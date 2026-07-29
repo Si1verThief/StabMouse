@@ -57,13 +57,14 @@ This is the mainstream choice: interception-tools, input-remapper, evsieve, keyd
 Steam Input and the Steam Deck's whole input stack all work this way. yeetmouse
 and maccel are the outliers, having gone in-kernel specifically for accel latency.
 
-Cost: a kernel→userspace→kernel round trip, roughly 0.2–0.5ms. Irrelevant for art,
-probably imperceptible for gaming — **but measure it against yeetmouse before
-retiring that module.**
+Cost: a kernel→userspace→kernel round trip, **measured at ~13µs median** (p99
+0.2ms, p99.9 0.7ms) — see D5. That is well inside the 1ms polling interval of a
+1000 Hz mouse, so there is no latency case for going in-kernel.
 
-Escape hatch if measurement says otherwise: HID-BPF for the accel stage only
-(kernel 6.3+, in-kernel report rewriting), keeping userspace for the art side.
-Design the filter pipeline so sensitivity filters can be lifted out later.
+The remaining latency work is the **tail**, not the median: the outliers are
+scheduler jitter rather than compute, so the lever is the hot thread's scheduling
+priority. HID-BPF survives as a theoretical escape hatch only; sensitivity filters
+stay separable because it is nearly free, not because we expect to need it.
 
 ### L1 — Transform
 

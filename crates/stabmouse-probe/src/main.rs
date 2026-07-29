@@ -6,6 +6,7 @@
 //! delivered as pressure to applications that support it and as plain pointer
 //! motion to those that do not.
 
+mod latency;
 mod tablet;
 
 use anyhow::Result;
@@ -25,12 +26,15 @@ enum Command {
     List,
     /// Create a virtual tablet, optionally driven from a real mouse.
     Tablet(tablet::Args),
+    /// Measure evdev->uinput round-trip latency. Fully synthetic; safe to run.
+    Latency(latency::Args),
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::List => list(),
         Command::Tablet(args) => tablet::run(args),
+        Command::Latency(args) => latency::run(args),
     }
 }
 

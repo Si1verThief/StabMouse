@@ -74,9 +74,37 @@ evsieve, keyd, Steam Input, Steam Deck). Kernel modules mean DKMS rebuilds on
 every kernel bump — a maintenance tax paid forever, and a bad experience for
 anyone installing this.
 
-**Open question:** the added round trip is ~0.2–0.5ms. Must be benchmarked against
-yeetmouse before that module is retired. If it proves perceptible, HID-BPF for
-the accel stage is the escape hatch, so keep accel filters separable.
+**Resolved by measurement, 2026-07-30.** The round trip was estimated at
+0.2–0.5ms. Measured on a closed synthetic loop (release build, 5000 samples):
+
+| | |
+|---|---|
+| median | **0.013 ms** |
+| p95 | 0.036 ms |
+| p99 | 0.215 ms |
+| p99.9 | 0.714 ms |
+| max | 1.77 ms |
+
+**The estimate was wrong by more than an order of magnitude.** Userspace capture
+costs ~13µs at the median — far below the 1 ms polling interval of a 1000 Hz mouse.
+There is no latency argument for going in-kernel.
+
+**What this changes:**
+
+- The concern that motivated keeping HID-BPF as an escape hatch is largely gone.
+  Keep sensitivity filters separable anyway — it is nearly free (see D12) — but
+  stop treating in-kernel as a likely destination.
+- **The tail is the thing to engineer, not the median.** p99.9 of 0.7ms and
+  occasional ~1.8ms outliers are scheduler jitter, not compute. The lever is
+  therefore **scheduling priority, not faster code** — the daemon's hot thread
+  should request elevated priority, and that is where any remaining latency work
+  belongs.
+
+**Caveats on the number:** measured on an idle system with a busy-wait pacer and a
+trivial passthrough forwarder. Under gaming load with CPU contention the tail will
+be worse, which is exactly why priority matters. Still needs a subjective
+back-to-back comparison against yeetmouse before that module is retired — 13µs
+says the architecture is sound, not that the feel is identical.
 
 ---
 
@@ -294,3 +322,48 @@ generalises. GTK is untested.
   pressure and no error. **The UI must detect this and say so explicitly** — it is
   otherwise indistinguishable from the feature being broken, and the fix ("restart
   Krita") is not guessable.
+
+---
+
+## D14 — Config is a directory; filenames are identities; state lives elsewhere
+
+**Decision:** see [config-schema.md](config-schema.md) for the full schema. Three
+choices with consequences beyond the file format:
+
+1. **A directory of small files**, not one monolith — one file per preset, one per
+   profile.
+2. **The filename is the entity's identity.** `presets/inking.toml` *is* the preset
+   `inking`. No internal name field to disagree with it.
+3. **Runtime state lives outside the config directory**, in
+   `~/.local/state/stabmouse/`.
+
+**Why:**
+
+1. Sharing a single preset is then a single file, which is what the Library feature
+   wants. Load cost is negligible at this scale.
+2. Renaming a file renames the thing; there is no possible disagreement between
+   filename and internal name; a shared file is unambiguous about what it is. Cost:
+   slugs must be filesystem-safe.
+3. **People will version-control `~/.config/stabmouse/`.** If last-active-mode lived
+   there, every mode switch would dirty their working tree — and mode switching is
+   the headline interaction, happening dozens of times a session. Config is authored
+   and shareable; state is neither.
+
+---
+
+## D15 — The user's config file is never rewritten unprompted
+
+**Decision:** migration happens in memory. A file on disk is only rewritten when
+the user takes an action that saves. Round-trips are byte-identical including
+comments, key order and whitespace.
+
+**Why:** the tinkerer contract's whole premise is that the config file belongs to
+the user. Silently rewriting a hand-commented config on first launch after an
+upgrade is precisely the betrayal that contract exists to prevent — and it is
+irreversible, because their comments are already gone by the time they notice.
+
+Read the old form, run the new one, touch nothing until asked.
+
+**Consequence:** `stabmouse-config` needs a format-preserving editor (`toml_edit`),
+not `serde` alone, and every schema version must remain loadable indefinitely
+rather than only until the next migration runs.

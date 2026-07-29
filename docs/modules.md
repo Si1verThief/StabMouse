@@ -245,17 +245,21 @@ work per event, no unbounded loops in any filter, and non-blocking writes.
 
 ### Latency budget
 
-Total added latency target: well under 1ms.
+**Measured baseline** (2026-07-30, synthetic closed loop, release build): the full
+evdev-read → forward → uinput-write → read-back round trip is **13µs median**, p99
+0.215ms, p99.9 0.714ms, max 1.77ms. The kernel transits are far cheaper than the
+50–200µs each originally assumed.
 
 | Stage | Target |
 |---|---|
-| evdev read wakeup | ~50–200µs (kernel) |
+| Full transport round trip | ≤50µs median |
 | preset process | <10µs |
-| uinput write | ~50–200µs (kernel) |
 | daemon overhead | <20µs |
+| **p99.9 total** | **<1ms** — one polling interval at 1000Hz |
 
-Exceeding these is a bug. `bench` is what proves it, and users can run it
-themselves.
+The median is already comfortable. **The tail is the real target**, and it is
+scheduler jitter rather than compute — so the hot thread wants elevated scheduling
+priority, and `bench` must report distribution and worst case, never a mean.
 
 ### Error policy
 
