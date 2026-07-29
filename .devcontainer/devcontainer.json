@@ -1,0 +1,47 @@
+{
+  "name": "StabMouse",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // IMPORTANT (rootless Docker): container root maps to host uid 1000 (beo).
+  // Running as root here is NOT host root -- it is the only way to inherit the
+  // host user's access to the Wayland socket and /dev/uinput. Running as the
+  // image's `vscode` user (uid 1000) would map into the subuid range and lose
+  // access to both.
+  "remoteUser": "root",
+
+  "runArgs": [
+    "--device=/dev/uinput"
+    // Reading real input devices additionally requires the HOST user to be in
+    // the `input` group, then uncomment:
+    // , "--group-add=992"
+    // , "--device=/dev/input"
+  ],
+
+  // Wayland socket passthrough so the Slint GUI can render from inside.
+  "mounts": [
+    "source=/run/user/1000,target=/run/user/1000,type=bind"
+  ],
+
+  "containerEnv": {
+    "XDG_RUNTIME_DIR": "/run/user/1000",
+    "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "Slint.slint",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "files.watcherExclude": {
+          "**/target/**": true
+        }
+      }
+    }
+  }
+}
