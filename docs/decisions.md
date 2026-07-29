@@ -177,3 +177,120 @@ mode in every profile using it. Same reasoning as D8.
 - **No cap on slot count** (per the standing preference against arbitrary limits).
   The UI is designed around two to four; direct-select bindings cover the first
   four; cycling handles the rest.
+
+---
+
+## D10 — The internal unit is millimetres
+
+**Decision:** `stabmouse-core` works in millimetres of physical movement as `f64`.
+All distance and speed parameters are physical quantities. Parameter keys carry
+explicit unit suffixes (`v_max_mm_s`, `attack_ms`).
+
+**Why:** preset sharing is a first-class feature, and physical units are what make
+a shared preset mean the same thing on someone else's hardware. `v_max_mm_s = 500`
+is identical on a 400-DPI office mouse and a 20,000-DPI gaming sensor.
+
+**Rejected:** normalized counts at a reference DPI, which is what libinput does.
+Simpler internally, but every shared config would be subtly wrong for anyone with
+a different sensor — a failure mode that is quiet and would erode the Library
+feature rather than break it visibly.
+
+**One deliberate exception:** `stabilize.radius_px` is in screen pixels, because
+the user perceives that value directly as "how far the cursor lags behind my hand
+on screen". That is a screen distance. Forcing it into millimetres would make the
+number meaningless to the person adjusting it. Documented in
+[stages.md](stages.md).
+
+---
+
+## D11 — Progressive disclosure is a project-wide pattern
+
+**Decision:** any stage with more than two parameters exposes **one macro control**
+that drives the rest, with the real parameters revealed under "advanced". The
+config file always contains the real values.
+
+Established by `sensitivity` (flat multiplier plain, acceleration curve nested) and
+`smooth` (one `amount` knob over `min_cutoff_hz` / `beta` / `d_cutoff_hz`). Applies
+to every stage meeting the bar.
+
+**Why:** this project serves two populations with opposite needs from the same
+screen. A person with tremor, or an artist who has never touched an acceleration
+curve, must be able to get a good result without confronting parameters they
+cannot evaluate — and will not touch a control that looks like it belongs to
+something they do not understand. A tinkerer must have every value.
+
+Progressive disclosure serves both without building two applications. The
+alternative — a "simple mode" and an "advanced mode" — splits the product and
+doubles the surface.
+
+**Constraint:** the macro must be a real function of the underlying parameters, not
+a separate code path. Moving the macro moves the real values, and they stay
+visible.
+
+---
+
+## D12 — Extension points are designed in, not retrofitted
+
+**Decision:** where a feature is already known to be an early extension, its
+interface is pluggable from the first commit — but the extensions themselves are
+not built.
+
+Current instances:
+
+- **`snap` constraint types.** Ellipse and perspective constraints are explicitly
+  planned as among the first post-v1 additions. The constraint type is a pluggable
+  interface; only `angle` and `line` ship initially.
+- **Platform I/O behind traits** (per D6), so a Windows port stays possible at
+  ~60–70% reuse without being built.
+- **`sensitivity` curve types**, so `jump`/sigmoid can be added without touching
+  the stage.
+
+**Why:** the cost of leaving a seam is near zero at design time and high once a
+concrete implementation has hardened around a single case. This is not
+speculative generality — it applies only where a specific extension is already
+named and expected.
+
+---
+
+## D13 — Virtual devices are created once at startup and never torn down
+
+**Decision:** the daemon creates **both** sinks — relative mouse and virtual
+tablet — at startup, unconditionally, and keeps them alive for its entire
+lifetime. Mode switching routes events between them. It does not create or destroy
+them.
+
+**Why — measured, and the mechanism is narrower than it first appeared.**
+Verified 2026-07-30; see `external-docs/research/probe-results.md`.
+
+Krita (Qt) initialises its tablet subsystem **only if a tablet is present when the
+application starts**. That initialisation never retries. But once it *has*
+initialised, hotplug works fine — removing the virtual tablet and recreating it,
+Krita re-hooks without complaint.
+
+So the failure is specifically: *application started with no tablet on the system
+at all* → no pressure, ever, for that process lifetime.
+
+**Blender is unaffected.** It picks up the tablet even when started before the
+device exists, and handles it more smoothly than Krita throughout. This is
+therefore a **toolkit-level quirk, not a platform rule** — do not assume it
+generalises. GTK is untested.
+
+**Consequences:**
+
+- Both sinks exist from daemon start, even when the active mode uses only one.
+- **The daemon should start before the user's applications.** Its systemd user unit
+  wants ordering early in session startup, and it belongs in the install docs.
+  This is a real requirement for Qt applications and merely tidy for others.
+- **"Panic — stop everything" still must not destroy the sinks**, but for a weaker
+  reason than first recorded: since already-initialised applications re-hook on
+  device return, tearing sinks down is *recoverable* rather than catastrophic. It
+  is still pointless — panic's job is returning the cursor, which ungrabbing
+  achieves — so panic *ungrabs and goes inert*, leaving the sinks in place.
+- `Enabled: off` keeps devices alive. Cheap, and avoids churn.
+- **The watchdog's `abort()` is cheaper than first assumed.** It kills the sinks,
+  but applications that were started with a tablet present will re-hook when the
+  daemon restarts. Only apps launched during the outage lose pressure.
+- A user who starts the daemon *after* opening their art application gets no
+  pressure and no error. **The UI must detect this and say so explicitly** — it is
+  otherwise indistinguishable from the feature being broken, and the fix ("restart
+  Krita") is not guessable.

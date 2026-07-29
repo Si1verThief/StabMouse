@@ -146,6 +146,11 @@ Device enumeration, identity, grabbing, reading, hotplug.
 
 Virtual device creation and event emission.
 
+- **Emits only axes whose value actually changed.** Restating every axis on every
+  `SYN_REPORT` is an event storm that *measurably breaks application UI* — it
+  caused doubled clicks in Krita's menus until fixed. This is a correctness
+  requirement, not an optimisation. Verified 2026-07-30.
+- **Both sinks are created at daemon startup and never torn down** — see D13.
 - Relative sink reproduces **every axis and button the source had**, including
   hi-res wheel.
 - Tablet sink declares evdev bits such that **libinput classifies it as a tablet
