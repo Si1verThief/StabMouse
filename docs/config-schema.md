@@ -38,7 +38,7 @@ without touching anything else.
 | Keys | `snake_case` |
 | Slugs and filenames | `kebab-case` |
 | Enable flag | `enabled` |
-| Units | suffixed in the key — `radius_px`, `attack_ms`, `v_max_mm_s` |
+| Units | suffixed in the key — `radius_mm`, `attack_ms`, `v_max_mm_s` |
 
 ## Preset file
 
@@ -52,7 +52,7 @@ dpi = 1600
 
 [[stage]]
 type = "stabilize"
-radius_px = 24.0
+radius_mm = 0.5
 catch_up = 0.35
 
 [[stage]]
@@ -117,7 +117,7 @@ profile = "line-art"
 [[group]]
 name = "CAD pucks"
 devices = [{ serial = "A1" }, { serial = "B2" }]
-overrides = { "inking.stabilize.radius_px" = 12.0 }
+overrides = { "inking.stabilize.radius_mm" = 0.3 }
 
 [[device]]
 match = { vid = "0738", pid = "0c08" }

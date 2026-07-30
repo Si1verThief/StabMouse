@@ -1,0 +1,16 @@
+[package]
+name = "stabmouse-canvas-probe"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Probes P3: whether Slint can host a responsive scratch canvas, how it looks, and
+# critically what input rate a GUI toolkit actually observes.
+
+[dependencies]
+anyhow.workspace = true
+slint = "1"
+
+[build-dependencies]
+slint-build = "1"

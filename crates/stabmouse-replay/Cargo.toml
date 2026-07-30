@@ -1,0 +1,15 @@
+[package]
+name = "stabmouse-replay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Record real strokes and replay them through candidate filter configurations."
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+evdev.workspace = true
+serde.workspace = true
+stabmouse-core = { path = "../stabmouse-core" }
+toml.workspace = true

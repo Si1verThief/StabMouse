@@ -223,11 +223,27 @@ Simpler internally, but every shared config would be subtly wrong for anyone wit
 a different sensor — a failure mode that is quiet and would erode the Library
 feature rather than break it visibly.
 
-**One deliberate exception:** `stabilize.radius_px` is in screen pixels, because
-the user perceives that value directly as "how far the cursor lags behind my hand
-on screen". That is a screen distance. Forcing it into millimetres would make the
-number meaningless to the person adjusting it. Documented in
-[stages.md](stages.md).
+**No exceptions.** An earlier draft carved out `stabilize.radius` in screen pixels,
+on the grounds that the user perceives it as on-screen lag. That was wrong on two
+counts, and it is worth recording why so it is not reintroduced:
+
+1. **Pixels are not computable here.** The mm→pixel mapping depends on compositor
+   pointer gain — outside this process, user-mutable, not reliably queryable — and on
+   per-monitor scale, so "30 px" is a different physical size on each screen of a
+   multi-monitor setup.
+2. **Millimetres are what deliver the portability requirement.** Two people on
+   different mice and screens who have each set DPI correctly must adjust the same
+   number and get the same hand-movement-to-screen-response relationship.
+
+The physics cooperates: hand tremor is physical, so a physical correction is right,
+and both tremor and correction pass through the same pointer gain — preserving the
+ratio for high- and low-sensitivity users alike. A pixel radius removes a fixed screen
+distance regardless of the hand movement it represents, under-correcting one and
+over-correcting the other.
+
+**Consequence for stage order:** position-domain filters (`smooth`, `stabilize`) run
+**before** `sensitivity`, so their parameters are in true hand millimetres. After it, a
+`multiplier` of 0.5 would silently double the effective radius and sharing would break.
 
 ---
 
@@ -272,6 +288,11 @@ Current instances:
   ~60–70% reuse without being built.
 - **`sensitivity` curve types**, so `jump`/sigmoid can be added without touching
   the stage.
+- **The `scroll` stage** — drag-to-scroll and middle-click joystick autoscroll.
+  Specified in stages.md, built after the core is solid. In scope because the daemon
+  already grabs a mouse and synthesises a virtual device, so it is one filter stage
+  rather than new infrastructure, and it fills a real gap: middle-click autoscroll is
+  standard on Windows and inconsistent on Linux desktops.
 
 **Why:** the cost of leaving a seam is near zero at design time and high once a
 concrete implementation has hardened around a single case. This is not
@@ -367,3 +388,40 @@ Read the old form, run the new one, touch nothing until asked.
 **Consequence:** `stabmouse-config` needs a format-preserving editor (`toml_edit`),
 not `serde` alone, and every schema version must remain loadable indefinitely
 rather than only until the next migration runs.
+
+---
+
+## D16 — Stages declare their interactions, and the UI surfaces them
+
+**Decision:** where two stages interact in a way that is not evident from either
+one alone, the relationship is declared in the stage definition and the UI presents
+it at the point of use — as a recommendation to review a named group of related
+settings, not as a warning or an error.
+
+**First instance:** the **anti-stall group** inside `pressure.speed`
+(`threshold_mm`, `behaviour`, `timeout_ms`). It exists solely because pulled-string
+stabilisation holds its anchor still whenever the cursor moves within the radius,
+which yields a zero-velocity sample that the speed term reads as maximum pressure.
+So whenever `stabilize` is in the pipeline, the UI recommends reviewing anti-stall.
+
+**Why:** this interaction took a live probe, a wrong first fix, and a geometric
+argument about radial versus tangential motion to identify. A user hitting the same
+blobs would have no route to the cause — the parameter that fixes it lives in a
+*different stage* from the one causing it, and nothing in either stage's own
+controls hints at the connection. Discoverability here is not a nicety; without it
+the feature is effectively unreachable.
+
+**Constraints:**
+
+- It is a **recommendation, not a warning.** The combination is not wrong, and users
+  who want the hotspots must not be nagged. This follows the same reasoning as
+  permitting `min_pressure = 0` and `velocity_smoothing_ms = 0`.
+- Related parameters are presented as a **named group**, so the relationship is
+  legible in the config file as well as the UI.
+- Generalises rather than being special-cased: `normalize.dpi` being wrong
+  mis-scales everything downstream, and stacking `smooth` with `stabilize` has its
+  own interactions. The mechanism should carry those too.
+
+**Where this came from:** identified from use on 2026-07-30, after the probe made
+the interaction visible. Recorded because the reasoning is not recoverable from the
+parameter list.

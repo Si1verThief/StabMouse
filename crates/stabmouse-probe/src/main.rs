@@ -7,6 +7,7 @@
 //! motion to those that do not.
 
 mod latency;
+mod passthrough;
 mod tablet;
 
 use anyhow::Result;
@@ -28,6 +29,8 @@ enum Command {
     Tablet(tablet::Args),
     /// Measure evdev->uinput round-trip latency. Fully synthetic; safe to run.
     Latency(latency::Args),
+    /// Grab a real mouse and forward it through a virtual device.
+    Passthrough(passthrough::Args),
 }
 
 fn main() -> Result<()> {
@@ -35,6 +38,7 @@ fn main() -> Result<()> {
         Command::List => list(),
         Command::Tablet(args) => tablet::run(args),
         Command::Latency(args) => latency::run(args),
+        Command::Passthrough(args) => passthrough::run(args),
     }
 }
 

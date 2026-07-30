@@ -167,6 +167,13 @@ Virtual device creation and event emission.
 Orchestration, runtime state, safety.
 
 - **Mode switch takes effect on the next event**, allocation-free.
+- **Timer-driven settle phase after stroke end.** When the button is released, filters
+  still hold state that must be flushed — the stabiliser's accumulated lag and the
+  pressure release envelope. The pipeline is event-driven and no further mouse events
+  may arrive, so the daemon must keep generating zero-motion samples until filters
+  converge or a timeout elapses. Without this, the stabiliser recovers its lag as a
+  single straight-line jump (measured at 4000–9000 mm/s) and pressure never ramps
+  down. Found by the replay bench, 2026-07-30; see stages.md.
 - **Profile switch** rebuilds presets off-path and swaps; no input dropped.
 - **Fail-open on panic**: grabs released, raw input flows.
 - **Idle CPU ≈ 0** with no input.
@@ -260,6 +267,35 @@ evdev-read → forward → uinput-write → read-back round trip is **13µs medi
 The median is already comfortable. **The tail is the real target**, and it is
 scheduler jitter rather than compute — so the hot thread wants elevated scheduling
 priority, and `bench` must report distribution and worst case, never a mean.
+
+### Hazard: never threshold a per-sample value when the quantity accumulates
+
+This has now caused three separate bugs in three different places. It should be
+checked for deliberately in review.
+
+**The pattern:** a quantity accumulates across samples, but the code gates on the
+*per-sample* value. At 1000 Hz each individual sample is tiny, so the gate rejects
+every one of them while the total is large. Slow-but-continuous motion is silently
+lost, and the failure is invisible in testing because fast motion works fine.
+
+Occurrences:
+
+| Where | Symptom |
+|---|---|
+| Quantizer, mm → counts | Any multiplier below 1.0 truncates every sub-count step to zero. A slowly-moved mouse does not move the cursor at all |
+| `pressure` stall handling | Banking time for zero-distance samples inflates the divisor, so resumption reads as spuriously slow and produces the exact hotspot the feature prevents |
+| Canvas ink stamping | With a low `catch_up` the anchor advances a fraction of a pixel per sample, so the output point travels visibly while drawing nothing |
+
+**The fix is always the same shape:** accumulate, threshold the accumulated value,
+and reset the accumulator only when it fires. Keep a "last committed" reference point
+rather than comparing against the previous sample.
+
+**Two corollaries that are easy to miss:**
+
+- **Flush on completion.** Whatever is still banked when a stroke ends must be
+  emitted, or the tail of every stroke is lost.
+- **Zero and small are different.** A genuinely stationary point should hold; a
+  slowly-moving one should bank. Conflating them is what caused the `pressure` bug.
 
 ### Error policy
 

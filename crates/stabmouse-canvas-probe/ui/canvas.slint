@@ -1,0 +1,140 @@
+import { Button, CheckBox, Slider } from "std-widgets.slint";
+
+// Absolute positioning throughout, deliberately: the pixel buffer must map 1:1 to
+// the TouchArea or the coordinates lie, and layout-driven sizing makes that
+// impossible to guarantee.
+export component MainWindow inherits Window {
+    title: "StabMouse canvas probe";
+    width: 1200px;
+    height: 940px;
+    background: #1b1b1f;
+
+    in property <image> canvas;
+    in property <string> stats;
+    in property <float> pressure;
+
+    in-out property <float> radius: 24;
+    in-out property <float> catch-up: 0.35;
+    in-out property <bool> ghost: true;
+    in-out property <bool> hold-stalled: true;
+    in-out property <float> vel-smoothing: 40;
+    in-out property <bool> vel-from-cursor: false;
+
+    // Split so the input-rate figure counts genuine motion only. Wiring both to one
+    // callback inflated the measurement roughly 2x.
+    callback moved(float, float, bool);
+    callback button(float, float, bool);
+    callback clear();
+
+    // --- header ---------------------------------------------------------------
+    Text {
+        x: 12px; y: 10px;
+        text: root.stats;
+        color: #d8d8de;
+        font-family: "monospace";
+        font-size: 13px;
+    }
+
+    CheckBox {
+        x: 530px; y: 6px;
+        text: "Hold velocity on stall";
+        checked <=> root.hold-stalled;
+    }
+
+    CheckBox {
+        x: 730px; y: 6px;
+        text: "Ghost (raw)";
+        checked <=> root.ghost;
+    }
+
+    Button {
+        x: 900px; y: 6px;
+        width: 90px;
+        text: "Clear";
+        clicked => { root.clear(); }
+    }
+
+    // pressure meter
+    Rectangle {
+        x: 1010px; y: 10px; width: 170px; height: 18px;
+        background: #2c2c33;
+        border-radius: 3px;
+        Rectangle {
+            x: 0px; y: 0px;
+            width: parent.width * root.pressure;
+            height: parent.height;
+            background: #6ea8fe;
+            border-radius: 3px;
+        }
+    }
+    Text {
+        x: 1010px; y: 32px;
+        text: "pressure";
+        color: #8a8a93;
+        font-size: 11px;
+    }
+
+    // --- sliders --------------------------------------------------------------
+    Text {
+        x: 12px; y: 56px; width: 150px;
+        text: "stabilise radius  " + round(root.radius) + "px";
+        color: #d8d8de;
+        font-size: 12px;
+    }
+    Slider {
+        x: 170px; y: 52px; width: 320px;
+        minimum: 0; maximum: 150;
+        value <=> root.radius;
+    }
+
+    Text {
+        x: 520px; y: 56px; width: 160px;
+        text: "catch-up  " + round(root.catch-up * 100) / 100;
+        color: #d8d8de;
+        font-size: 12px;
+    }
+    Slider {
+        x: 690px; y: 52px; width: 320px;
+        minimum: 0.02; maximum: 1.0;
+        value <=> root.catch-up;
+    }
+
+    Text {
+        x: 12px; y: 92px; width: 200px;
+        text: "velocity smoothing  " + round(root.vel-smoothing) + "ms";
+        color: #d8d8de;
+        font-size: 12px;
+    }
+    Slider {
+        x: 200px; y: 88px; width: 290px;
+        minimum: 5; maximum: 400;
+        value <=> root.vel-smoothing;
+    }
+    CheckBox {
+        x: 530px; y: 88px;
+        text: "velocity from cursor (not output)";
+        checked <=> root.vel-from-cursor;
+    }
+
+    // --- canvas ---------------------------------------------------------------
+    Rectangle {
+        x: 10px; y: 126px;
+        width: 1180px; height: 780px;
+        background: #ffffff;
+        border-radius: 2px;
+
+        Image {
+            x: 0px; y: 0px;
+            width: 1180px; height: 780px;
+            source: root.canvas;
+            image-fit: fill;
+        }
+
+        ta := TouchArea {
+            width: 1180px;
+            height: 780px;
+            moved => { root.moved(ta.mouse-x / 1px, ta.mouse-y / 1px, ta.pressed); }
+            pointer-event(e) => { root.button(ta.mouse-x / 1px, ta.mouse-y / 1px, ta.pressed); }
+        }
+    }
+}

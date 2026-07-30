@@ -393,14 +393,32 @@ Breaking any of these is how tools lose their power users.
 - Per-device configuration via the overlay model above.
 - **Only touch devices explicitly opted in.** Never grab the trackpad by default.
 
-## Deferred / to be settled by testing
+## Settled by testing
 
-- **Whether "Enabled: off" should keep virtual devices alive.** Current assumption
-  is yes, to avoid mid-session device disappearance. Needs testing against real
-  games.
-- **Game device enumeration.** Titles that enumerate input at startup may see the
-  real device disappear and a virtual one appear; ordering may matter, especially
-  under Proton and with Steam Input. Do the sensible thing, then test.
+**`Enabled: off` keeps virtual devices alive** — confirmed, and now a requirement
+rather than an assumption (D13). Its semantics are **pass raw through**: grab held,
+events flowing, no transformation. It is *not* "stop emitting" — a daemon holding a
+grab while emitting nothing is a dead mouse system-wide, and is never a valid
+resting state.
+
+| State | Grab | Emission | Mouse |
+|---|---|---|---|
+| `Enabled: on` | held | filtered | works, filtered |
+| `Enabled: off` | held | **unmodified** | works, raw |
+| Wedged | held | none | **dead** |
+| Panic | **released** | none | works, direct |
+
+This is a second, independent reason panic must *release the grab* rather than
+merely stop emitting.
+
+**Game device enumeration is not a problem.** Tested 2026-07-30 with Noita (Proton),
+VRChat (Proton GE, **EAC**) and CS: Source (native, **VAC secure servers**). All
+accepted a grabbed physical mouse plus a uinput virtual device, all responded
+correctly to a sensitivity change, and all survived the virtual device going silent
+and resuming without needing a restart.
+
+## Deferred
+
 - **Richer tray** (quick sliders, per-device switching) once the simple one is
   proven.
 
