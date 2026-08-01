@@ -978,11 +978,13 @@ which this design is one step closer to.
 
 ---
 
-## D25 — Scrolling stops the pen, because the platform offers no other way
+## D25 — Scrolling stops the pen, in the applications that need it
 
-**Decision:** while the wheel is turning in tablet transport, the pen holds still. Hand
-movement during that window is **discarded, not banked**. On by default, with
-`freeze_position_while_scrolling = false` and `scroll_freeze_ms` per profile.
+**Decision:** while the wheel is turning in tablet transport, the pen holds still — **in
+the applications that filter mouse input during pen proximity, and only those**. Hand
+movement during that window is **discarded, not banked**. Named in `[scroll_freeze]`,
+with a built-in list, a per-profile default for unnamed applications, and
+`scroll_freeze_ms` for the hold.
 
 **The constraint is mutually exclusive, and both halves were measured.**
 
@@ -1021,11 +1023,21 @@ for while it was scrolling — which is the same reasoning, reached from the use
 
 - The pen is **not taken out of proximity** to achieve this. Proximity churn is what
   applications handle worst (D13), and the freeze needs the tool present anyway.
-- Off is a legitimate setting for someone who never scrolls in a tablet-aware application
-  and would rather keep the pen live at all times.
-- Blender never needed this, and is unharmed by it: a pen that holds still while the
-  wheel turns is reasonable behaviour everywhere, which is why it is one global setting
-  rather than a per-application table nobody could maintain.
+
+**This is a property of the application, not of the mode**, and the first implementation
+got that wrong. It shipped as one global switch on the reasoning that "a pen that holds
+still while the wheel turns is reasonable behaviour everywhere" — which was a
+rationalisation for a simpler implementation, and was corrected the moment it was used:
+Blender scrolls perfectly well while the pen moves, so freezing there removes a
+capability and buys nothing. One setting for both applications has to be wrong for one of
+them.
+
+**Unnamed applications are not frozen**, which is the same asymmetry that governs the pen
+tier one decision earlier. Doing nothing to an application that turned out to need it
+shows up as a scroll that does not work — visible, nameable, one line to fix. Freezing
+one that did not want it silently removes the ability to move and scroll at once, and the
+user has no reason to suspect a setting exists. **The safe direction is to do less**, and
+this project has now learned that twice in one day.
 
 ---
 

@@ -422,6 +422,14 @@ fn run(
         .map(|(k, v)| (k.clone(), *v))
         .collect();
 
+    let scroll_freeze: Vec<(String, bool)> = store
+        .root
+        .data()
+        .scroll_freeze
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+
     // Opt-in per profile, so an absent section means no auto-switching at all.
     let auto_rules: Vec<(String, usize)> = store
         .startup_profile()
@@ -604,7 +612,8 @@ fn run(
             .is_some_and(|p| p.tablet_emits_mouse_clicks),
         freeze_while_scrolling: store
             .startup_profile()
-            .map_or(true, |p| p.freeze_position_while_scrolling),
+            .is_some_and(|p| p.freeze_position_while_scrolling),
+        scroll_freeze_overrides: scroll_freeze.clone(),
         scroll_freeze: std::time::Duration::from_millis(
             store.startup_profile().map_or(250, |p| p.scroll_freeze_ms),
         ),
@@ -641,7 +650,14 @@ fn run(
                                 .is_some_and(|p| p.tablet_emits_mouse_clicks),
                             freeze_position_while_scrolling: fresh
                                 .startup_profile()
-                                .map_or(true, |p| p.freeze_position_while_scrolling),
+                                .is_some_and(|p| p.freeze_position_while_scrolling),
+                            scroll_freeze: fresh
+                                .root
+                                .data()
+                                .scroll_freeze
+                                .iter()
+                                .map(|(k, v)| (k.clone(), *v))
+                                .collect(),
                             scroll_freeze_ms: fresh
                                 .startup_profile()
                                 .map_or(250, |p| p.scroll_freeze_ms),

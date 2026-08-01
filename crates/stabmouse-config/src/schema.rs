@@ -92,23 +92,14 @@ pub struct Profile {
     #[serde(default)]
     pub tablet_emits_mouse_clicks: bool,
 
-    /// In tablet mode, hold the pen still while the wheel is turning.
+    /// Whether to hold the pen still while scrolling in an application not named in
+    /// `[scroll_freeze]` and not on the built-in list.
     ///
-    /// **On by default, because without it scrolling does not work in Krita at all.** Krita
-    /// discards mouse input while a pen is in proximity — the standard defence against drivers
-    /// that synthesise mouse events from tablet events — and the suppression is time-based,
-    /// resetting on every tablet event. A moving pen therefore keeps the wheel suppressed
-    /// indefinitely, which is exactly what was reported: scrolling worked only when the hand
-    /// held still. Sending the wheel from the tablet itself instead is not possible; libinput
-    /// will not give a tablet the pointer capability that scroll requires (P9).
-    ///
-    /// So the pen stops instead. Hand movement during a scroll is discarded rather than
-    /// banked, which is what makes it feel like a scroll rather than a delayed jump — and
-    /// moving the cursor was not what the hand was asking for anyway.
-    ///
-    /// Off is a legitimate choice for someone who never scrolls in a tablet-aware application
-    /// and would rather keep the pen live.
-    #[serde(default = "yes")]
+    /// **Off**, following the same asymmetry as the pen tier itself: doing nothing to an
+    /// application that turned out not to need it is invisible, while doing something to one
+    /// that did not want it removes a capability the user had. The applications known to need
+    /// the freeze are named, and adding one is a line.
+    #[serde(default)]
     pub freeze_position_while_scrolling: bool,
 
     /// How long the pen stays frozen after the last wheel event, in milliseconds.
@@ -179,6 +170,16 @@ pub struct Root {
     /// `stabmouse-probe focus` prints the classes as they are actually reported.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tablet_support: BTreeMap<String, bool>,
+
+    /// Whether an application needs the pen held still to receive a scroll, by window class.
+    ///
+    /// **A property of the application, not of the mode.** Krita ignores mouse input while a
+    /// pen is in proximity, so it needs the pen to stop before the wheel reaches it; Blender
+    /// does not filter that way and scrolls perfectly well mid-movement, so freezing there
+    /// removes the ability to move while scrolling and gains nothing. One setting for both
+    /// would have to be wrong for one of them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scroll_freeze: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

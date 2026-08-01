@@ -76,9 +76,10 @@ pub struct Runtime {
     /// Tracked here rather than read from the report, because a button's state persists
     /// between reports while `report.keys` carries only transitions.
     pub buttons_held: Vec<u16>,
-    /// Hold the pen still while the wheel turns, so scrolling works in tablet-aware
-    /// applications. See the config field of the same name for why this is necessary.
+    /// Whether to freeze in an application neither named nor on the built-in list.
     pub freeze_while_scrolling: bool,
+    /// User entries naming applications that do or do not need the freeze.
+    pub scroll_freeze_overrides: Vec<(String, bool)>,
     /// How long the freeze outlasts the last wheel event.
     pub scroll_freeze: Duration,
     /// When the current freeze ends, if one is running.
@@ -125,6 +126,7 @@ pub struct Reloaded {
     pub tablet_emits_mouse_clicks: bool,
     pub freeze_position_while_scrolling: bool,
     pub scroll_freeze_ms: u64,
+    pub scroll_freeze: Vec<(String, bool)>,
 }
 
 /// Which signal a state change should announce.
@@ -403,6 +405,7 @@ impl Runtime {
                         .set_destroy_on_leave(fresh.destroy_tablet_on_leave);
                     self.tablet_clicks = fresh.tablet_emits_mouse_clicks;
                     self.freeze_while_scrolling = fresh.freeze_position_while_scrolling;
+                    self.scroll_freeze_overrides = fresh.scroll_freeze;
                     self.scroll_freeze = Duration::from_millis(fresh.scroll_freeze_ms);
                     let name = self
                         .modes
@@ -597,13 +600,19 @@ impl Runtime {
     /// pen, because otherwise its cursor moves and nothing it clicks responds (D18). Pressure
     /// is the only loss, and that application could never have received it.
     fn transport(&self) -> Output {
+        self.transport_for(&self.under_position())
+    }
+
+    /// The transport for a window already looked up, so a caller that needs the window for
+    /// something else does not pay for a second hit-test.
+    fn transport_for(&self, under: &crate::focus::Under) -> Output {
         let Some(mode) = self.modes.current() else {
             return Output::Mouse;
         };
         if mode.output != Output::Tablet {
             return mode.output;
         }
-        if crate::focus::supports_tablet(&self.under_position(), &self.tablet_overrides) {
+        if crate::focus::supports_tablet(under, &self.tablet_overrides) {
             Output::Tablet
         } else {
             Output::Mouse
@@ -705,10 +714,14 @@ impl Runtime {
     ) -> anyhow::Result<()> {
         self.track_button(report, stroke_active);
 
+        // The window under the position, looked up once: it decides both the transport and
+        // whether this application needs the pen held still to receive a scroll.
+        let under = self.under_position();
+
         // The transport, which is not always the mode's preference. The mode, the preset and
         // every filter above are untouched — see D20: a mode is the user's intent, and where
         // the result is delivered is a detail of the application in front of them.
-        let output = self.transport();
+        let output = self.transport_for(&under);
         let mode_wants_tablet = self
             .modes
             .current()
@@ -852,19 +865,27 @@ impl Runtime {
                 self.mouse.flush()?;
             }
             Output::Tablet => {
-                // **A scroll stops the pen.** Krita discards mouse input while a pen is in
-                // proximity, on a timer that every tablet event resets, so a moving pen
-                // suppresses the wheel indefinitely — scrolling worked only when the hand
-                // held still, which is how the mechanism was identified. Sending the wheel
-                // from the tablet instead is not possible: libinput will not give a tablet the
-                // pointer capability that scroll requires (P9).
+                // **A scroll stops the pen — in the applications that need it.** Krita
+                // discards mouse input while a pen is in proximity, on a timer that every
+                // tablet event resets, so a moving pen suppresses the wheel indefinitely;
+                // scrolling worked only when the hand held still, which is how the mechanism
+                // was identified. Sending the wheel from the tablet instead is not possible:
+                // libinput will not give a tablet the pointer capability scroll requires (P9).
                 //
-                // So the pen holds still for as long as the wheel is turning, and the hand's
-                // movement during that time is **discarded rather than banked**. Banking it
-                // would fling the cursor when the freeze lifted, and moving the cursor was not
-                // what the hand was asking for while it was scrolling.
-                if self.freeze_while_scrolling && !*stroke_active
+                // Blender does not filter this way and scrolls perfectly well mid-movement, so
+                // this is a property of the **application**, not of the mode — freezing
+                // everything would take from Blender to give to Krita.
+                //
+                // The hand's movement during a freeze is **discarded rather than banked**.
+                // Banking it would fling the cursor when the freeze lifted, and moving the
+                // cursor was not what the hand was asking for while it was scrolling.
+                if !*stroke_active
                     && !report.other_relative.is_empty()
+                    && crate::focus::needs_scroll_freeze(
+                        &under.class,
+                        &self.scroll_freeze_overrides,
+                        self.freeze_while_scrolling,
+                    )
                 {
                     self.frozen_until = Some(Instant::now() + self.scroll_freeze);
                 }

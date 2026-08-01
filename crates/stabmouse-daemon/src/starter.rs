@@ -61,6 +61,18 @@ profile = "default"
 # vivaldi-stable = true
 # "org.kde.krita" = true
 
+# Which applications need the pen held still before a scroll reaches them. Krita ignores mouse
+# input while a pen is in proximity, so the wheel only arrives once the pen has stopped — it is
+# on the built-in list for that reason. Blender has no such filter and scrolls fine while the
+# pen moves, so it is not, and freezing it would only remove something that works.
+#
+# Set one true if scrolling in it does nothing while your hand moves; set one false to keep the
+# pen live and give up scrolling there.
+#
+# [scroll_freeze]
+# krita = false
+# "some-other-app" = true
+
 # Devices are opt-in: anything not listed here is never touched, which is what keeps
 # trackpads and unrelated hardware safe. `stabmoused devices` shows vid:pid.
 #
@@ -167,10 +179,9 @@ default_mode = 1
 # tracks those two positions separately. Left here only so the switch exists.
 # tablet_emits_mouse_clicks = true
 
-# Hold the pen still while the wheel is turning, so scrolling works in tablet mode. On by
-# default, because Krita ignores mouse input while a pen is in proximity and a moving pen keeps
-# that filter armed — without this, scrolling only works when your hand is perfectly still.
-# Movement during a scroll is discarded rather than delayed, so nothing lurches afterwards.
+# How long the pen stays held after the last wheel notch, for applications that need it —
+# see [scroll_freeze] in config.toml. Setting this true freezes in every application, including
+# the ones that scroll fine without it.
 #
 # freeze_position_while_scrolling = false
 # scroll_freeze_ms = 250

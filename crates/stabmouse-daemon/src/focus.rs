@@ -479,6 +479,48 @@ pub fn explain(under: &Under, overrides: &[(String, bool)]) -> (bool, &'static s
     }
 }
 
+/// Whether an application needs the pen held still before a scroll will reach it.
+///
+/// **Keyed on the application, not on the mode.** Krita ignores mouse input while a pen is in
+/// proximity — a time-based filter that every tablet event resets — so the wheel only arrives
+/// once the pen has been quiet. Blender does not filter that way and scrolls perfectly well
+/// while the pen moves, so freezing it there would remove something that worked.
+///
+/// **Unlisted applications are not frozen**, for the same asymmetry that governs the pen tier:
+/// doing nothing to an application that turned out to need it shows up as a scroll that does
+/// not work, which is a thing the user can see and name, while freezing one that did not want
+/// it silently removes the ability to move and scroll at once. `default_freeze` lets a profile
+/// flip that for everything unnamed, and `[scroll_freeze]` names exceptions in either
+/// direction.
+pub fn needs_scroll_freeze(
+    class: &str,
+    overrides: &[(String, bool)],
+    default_freeze: bool,
+) -> bool {
+    let class = class.trim();
+    if !class.is_empty() {
+        for (name, freeze) in overrides {
+            if name.eq_ignore_ascii_case(class) {
+                return *freeze;
+            }
+        }
+    }
+
+    // Applications measured to filter mouse input during pen proximity. Short on purpose: an
+    // entry here costs its user the ability to move while scrolling, so a name belongs on it
+    // only once the behaviour has actually been seen.
+    const FILTERS_MOUSE_DURING_PROXIMITY: &[&str] = &["krita"];
+
+    let lower = class.to_ascii_lowercase();
+    if FILTERS_MOUSE_DURING_PROXIMITY
+        .iter()
+        .any(|k| lower == *k || lower.starts_with(&format!("{k}-")))
+    {
+        return true;
+    }
+    default_freeze
+}
+
 /// Applications known to implement pen input on Wayland.
 ///
 /// **Programs, not toolkits** — see [`explain`]. Membership means the application handles
@@ -596,6 +638,40 @@ mod tests {
     #[test]
     fn nothing_under_the_pointer_uses_the_pointer() {
         assert!(!supports_tablet(&under("", None), &[]));
+    }
+
+    #[test]
+    fn only_applications_that_filter_the_mouse_freeze_the_pen() {
+        // The distinction that makes this per-application: Krita needs the pen quiet before a
+        // wheel reaches it, Blender scrolls fine mid-movement and freezing it would take away
+        // something that worked.
+        assert!(needs_scroll_freeze("krita", &[], false));
+        assert!(!needs_scroll_freeze("blender", &[], false));
+    }
+
+    #[test]
+    fn an_unlisted_application_is_left_alone_by_default() {
+        // Same asymmetry as the pen tier: doing nothing is visible and correctable, doing
+        // something unwanted quietly removes a capability.
+        assert!(!needs_scroll_freeze("inkscape", &[], false));
+        // ...unless the profile asks for the opposite.
+        assert!(needs_scroll_freeze("inkscape", &[], true));
+    }
+
+    #[test]
+    fn a_scroll_freeze_entry_wins_in_either_direction() {
+        let off = vec![("krita".to_string(), false)];
+        assert!(!needs_scroll_freeze("krita", &off, false), "a user may switch it off");
+        let on = vec![("blender".to_string(), true)];
+        assert!(needs_scroll_freeze("blender", &on, false), "and on");
+        // An override also beats the profile default.
+        let no = vec![("gimp".to_string(), false)];
+        assert!(!needs_scroll_freeze("gimp", &no, true));
+    }
+
+    #[test]
+    fn a_versioned_class_still_matches_the_freeze_list() {
+        assert!(needs_scroll_freeze("krita-5.2", &[], false));
     }
 
     #[test]
