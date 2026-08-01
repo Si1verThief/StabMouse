@@ -76,6 +76,15 @@ pub struct Scroll {
     pub momentum: bool,
     /// Seconds for a flick to decay to about a third of its release speed.
     pub momentum_decay_s: f64,
+    /// Take the physical wheel through this stage while its binding is held.
+    ///
+    /// The point is momentum on a wheel you already own: hold the binding, flick the wheel,
+    /// and the page carries on. Unclaimed wheel movement is never touched — it leaves exactly
+    /// as it arrived, because a feature that could silently eat scrolling would not be worth
+    /// having.
+    pub take_wheel: bool,
+    /// Notches of output per notch of wheel, while the wheel is being taken.
+    pub wheel_gain: f64,
     /// With a chord binding, letting go of *everything* ends the glide.
     ///
     /// Releasing one part of the chord leaves the page coasting; releasing the rest stops it
@@ -130,6 +139,8 @@ impl Scroll {
             // A flick that dies in a third of a second reads as a surface with weight rather
             // than as one that keeps going after the hand has moved on.
             momentum_decay_s: 0.35,
+            take_wheel: false,
+            wheel_gain: 1.0,
             full_release_stops_momentum: false,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -224,6 +235,29 @@ impl Stage for Scroll {
         let dt = if s.dt.is_finite() && s.dt > 0.0 { s.dt } else { 0.0 };
         let sign = if self.invert { -1.0 } else { 1.0 };
         let active = self.engaged(s.scrolling);
+
+        // The wheel, when its binding says so. Taken *and cleared*, so the daemon does not
+        // also pass the original through and double it; left alone otherwise, so a wheel
+        // nothing claims behaves exactly as it always did.
+        if self.take_wheel && s.wheel_claimed && (s.wheel_v != 0.0 || s.wheel_h != 0.0) {
+            let gain = if self.wheel_gain.is_finite() && self.wheel_gain > 0.0 {
+                self.wheel_gain
+            } else {
+                1.0
+            };
+            let (v, h) = (s.wheel_v * gain, s.wheel_h * gain);
+            s.wheel_v = 0.0;
+            s.wheel_h = 0.0;
+            s.scroll_y += v;
+            s.scroll_x += h;
+            // A wheel notch is an impulse rather than a rate, so the glide is seeded from the
+            // notch itself: one flick of the wheel, one length of coast.
+            if self.momentum && dt > 0.0 {
+                self.glide_y += v / dt.max(0.008);
+                self.glide_x += h / dt.max(0.008);
+                self.coasting = true;
+            }
+        }
 
         if !active {
             // Letting go of the whole chord is a brake. Checked before the glide runs, so a
@@ -591,6 +625,40 @@ mod tests {
         feed(&mut stage, &steps);
         feed(&mut stage, &[(0.0, 0.0, true); 2]);
         assert!(stage.glide_x == 0.0 && stage.glide_y == 0.0);
+    }
+
+    #[test]
+    fn an_unclaimed_wheel_passes_through_untouched() {
+        // The guarantee that makes routing the wheel through the pipeline safe at all: a
+        // stage that is not taking it must leave it exactly as it arrived, on every axis.
+        for take in [false, true] {
+            let mut stage = Scroll::new(Mode::Drag);
+            stage.take_wheel = take;
+            let mut s = Sample::new(0.0, 0.0, 1000, false);
+            s.dt = 0.001;
+            s.wheel_v = 3.0;
+            s.wheel_h = -2.0;
+            // Never claimed, so `take_wheel` alone must change nothing.
+            s.wheel_claimed = false;
+            stage.process(&mut s);
+            assert_eq!((s.wheel_v, s.wheel_h), (3.0, -2.0), "take_wheel = {take}");
+            assert_eq!((s.scroll_x, s.scroll_y), (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn a_claimed_wheel_is_taken_on_both_axes() {
+        let mut stage = Scroll::new(Mode::Drag);
+        stage.take_wheel = true;
+        let mut s = Sample::new(0.0, 0.0, 1000, false);
+        s.dt = 0.001;
+        s.wheel_v = 3.0;
+        s.wheel_h = -2.0;
+        s.wheel_claimed = true;
+        stage.process(&mut s);
+        assert_eq!((s.wheel_v, s.wheel_h), (0.0, 0.0), "taken means cleared, or it doubles");
+        assert_eq!(s.scroll_y, 3.0);
+        assert_eq!(s.scroll_x, -2.0, "the horizontal wheel is not an afterthought");
     }
 
     #[test]

@@ -419,12 +419,29 @@ pub const STAGES: &[StageSpec] = &[
                  hold away from where you pressed, and keeps scrolling while you hold still.",
             ),
             bind("button", "Button", "What engages the gesture. BTN_MIDDLE is the familiar one."),
+            c(
+                "mouse_passthrough",
+                "Bound mouse button still",
+                "unless_active",
+                &["always", "unless_active", "reserved"],
+                "What a bound *mouse* button still does for the application — keyboard keys \
+                 are never taken, since this daemon does not emit them. `unless_active` keeps \
+                 the button working except in the exact combination you bound, so with \
+                 alt+middle a plain middle click still pastes. `always` never takes it; \
+                 `reserved` always does.",
+            ),
+            bind(
+                "wheel_modifier",
+                "Wheel through this stage while held",
+                "Hold this and your own wheel is routed through the stage, picking up its \
+                 speed and momentum. Unclaimed wheel movement is never touched.",
+            ),
             b(
-                "passthrough",
-                "Button keeps its normal job",
+                "take_wheel",
+                "Take the wheel",
                 false,
-                "By default a button bound here is consumed, so binding the middle button to \
-                 a gesture does not also paste. Turn this on to let it do both.",
+                "Required for the wheel binding to do anything — off, the wheel is never \
+                 touched no matter what is held.",
             ),
             when(
                 f(

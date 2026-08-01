@@ -139,6 +139,27 @@ pub enum Output {
     Relative,
 }
 
+/// What happens to a **mouse button** that a preset binds to a gesture.
+///
+/// Only mouse buttons: keyboard keys are never emitted by this daemon, so there is nothing to
+/// pass through or withhold, and naming it otherwise would claim control over a device the
+/// project deliberately does not take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Passthrough {
+    /// The button always does its usual job as well as driving the gesture.
+    Always,
+    /// It does its usual job *except* while the binding is engageable — with
+    /// `alt+middle`, middle alone still pastes, and middle with alt held does not.
+    ///
+    /// The default, because it is the only one that costs the user nothing: a button keeps
+    /// everything it did, and only the exact combination they chose is taken.
+    #[default]
+    UnlessActive,
+    /// The button belongs to the binding and never does anything else.
+    Reserved,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRule {
     /// Window class or app id to match.

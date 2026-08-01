@@ -24,5 +24,6 @@ pub use store::{LoadReport, Store, RAW};
 pub use error::{Error, Result};
 pub use schema::{
     is_valid_slug, AppRule, Defaults, Device, Group, Identity, Match, Mode, Output, Params,
+    Passthrough,
     Preset, Profile, Root, StageEntry, CURRENT_SCHEMA,
 };

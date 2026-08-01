@@ -1143,12 +1143,14 @@ impl Runtime {
         self.swallow_release.clear();
     }
 
-    /// Whether a button is part of any gesture binding on the current mode.
+    /// Whether a bound mouse button should be withheld from the application.
     ///
     /// Only mouse buttons: a keyboard key is never emitted by this daemon, so there is
-    /// nothing to swallow, and treating one as consumed would be a claim about a device we
+    /// nothing to withhold, and treating one as consumed would be a claim about a device we
     /// deliberately do not control.
     fn bound_to_gesture(&self, code: u16) -> bool {
+        use stabmouse_config::Passthrough;
+
         if !stabmouse_input::is_mouse_button(code) {
             return false;
         }
@@ -1157,14 +1159,26 @@ impl Runtime {
         if code == self.pen_button {
             return false;
         }
-        self.modes.current().is_some_and(|m| {
-            !m.pass_through
-                && m.scroll_button
-                    .iter()
-                    .chain(m.modifier.iter())
-                    .flatten()
-                    .any(|c| *c == code)
-        })
+        let Some(mode) = self.modes.current() else {
+            return false;
+        };
+        let chords = || mode.scroll_button.iter().chain(mode.modifier.iter());
+
+        match mode.passthrough {
+            Passthrough::Always => false,
+            Passthrough::Reserved => chords().flatten().any(|c| *c == code),
+            // **Taken only when the rest of its chord is already held.** With `alt+middle`,
+            // middle alone still pastes and middle with alt held does not — so a binding
+            // costs the button nothing outside the exact combination that was chosen. For a
+            // single-button binding there is no "rest", so it is taken whenever bound.
+            Passthrough::UnlessActive => chords().any(|chord| {
+                chord.contains(&code)
+                    && chord
+                        .iter()
+                        .filter(|c| **c != code)
+                        .all(|c| self.code_held(*c))
+            }),
+        }
     }
 
     /// Whether any chord is fully held.
@@ -1278,6 +1292,10 @@ impl Runtime {
         let constrain = self.constrain_held();
         let scrolling = self.scroll_held();
         let scroll_partial = self.scroll_partly_held();
+        let wheel_claimed = self
+            .modes
+            .current()
+            .is_some_and(|m| !m.wheel_binding.is_empty() && self.any_held(&m.wheel_binding));
 
         let Some(mode) = self.modes.current_mut() else {
             return Ok(());
@@ -1292,10 +1310,61 @@ impl Runtime {
         sample.constrain = constrain;
         sample.scrolling = scrolling;
         sample.scroll_partial = scroll_partial;
+
+        // The physical wheel enters the pipeline so a stage may act on it. **Whatever comes
+        // back out is emitted verbatim**, so a wheel nothing claims is untouched — the whole
+        // point of routing it through is momentum on a wheel you already own, not a new way
+        // to lose scrolling.
+        use evdev::RelativeAxisCode as Rel;
+        for (code, value) in &report.other_relative {
+            let v = f64::from(*value);
+            if *code == Rel::REL_WHEEL.0 {
+                sample.wheel_v += v;
+            } else if *code == Rel::REL_HWHEEL.0 {
+                sample.wheel_h += v;
+            } else if *code == Rel::REL_WHEEL_HI_RES.0 {
+                sample.wheel_v += v / HI_RES_PER_NOTCH;
+            } else if *code == Rel::REL_HWHEEL_HI_RES.0 {
+                sample.wheel_h += v / HI_RES_PER_NOTCH;
+            }
+        }
+        sample.wheel_claimed = wheel_claimed;
+        let wheel_in = (sample.wheel_v, sample.wheel_h);
         mode.pipeline.process(&mut sample);
 
         // The `scroll` stage turns held motion into scroll and consumes the motion, so a
         // gesture reaches the sinks as wheel events rather than as cursor movement.
+        // Anything a stage did not take leaves as it arrived. Compared against what went in,
+        // so a stage that only *changed* the value still cannot make it vanish unnoticed.
+        let wheel_kept = sample.wheel_v == wheel_in.0 && sample.wheel_h == wheel_in.1;
+        let passthrough_wheel: Vec<(u16, i32)> = if wheel_kept {
+            report.other_relative.clone()
+        } else {
+            // Partly consumed: re-emit only what is left, at the resolution it came in.
+            let mut out = Vec::new();
+            if sample.wheel_v != 0.0 {
+                out.push((Rel::REL_WHEEL_HI_RES.0, (sample.wheel_v * HI_RES_PER_NOTCH) as i32));
+            }
+            if sample.wheel_h != 0.0 {
+                out.push((Rel::REL_HWHEEL_HI_RES.0, (sample.wheel_h * HI_RES_PER_NOTCH) as i32));
+            }
+            // Axes that are not the wheel — pan, or anything unusual a device carries — were
+            // never candidates and must survive regardless.
+            for (code, value) in &report.other_relative {
+                if ![
+                    Rel::REL_WHEEL.0,
+                    Rel::REL_HWHEEL.0,
+                    Rel::REL_WHEEL_HI_RES.0,
+                    Rel::REL_HWHEEL_HI_RES.0,
+                ]
+                .contains(code)
+                {
+                    out.push((*code, *value));
+                }
+            }
+            out
+        };
+
         let gesture = self.take_scroll(&sample);
 
         match output {
@@ -1334,7 +1403,7 @@ impl Runtime {
                         // Wheel and buttons bypass the filters: they are not pointer
                         // motion. Through this sink they land under the visible cursor,
                         // which the relative sink could not guarantee.
-                        for (code, value) in &report.other_relative {
+                        for (code, value) in &passthrough_wheel {
                             pointer.relative(*code, *value);
                         }
                         emit_scroll(gesture, |code, value| pointer.relative(code, value));
@@ -1370,7 +1439,7 @@ impl Runtime {
                 // Wheel and buttons bypass the filters: they are not pointer motion, and
                 // reinterpreting them as such would be wrong. The `scroll` stage's output is
                 // the exception — it *is* filtered, being motion the pipeline reinterpreted.
-                for (code, value) in &report.other_relative {
+                for (code, value) in &passthrough_wheel {
                     self.mouse.relative(*code, *value);
                 }
                 emit_scroll(gesture, |code, value| self.mouse.relative(code, value));
@@ -1396,7 +1465,7 @@ impl Runtime {
                     self.stall_dy = 0.0;
                 }
                 self.mouse.motion(dx, dy);
-                for (code, value) in &report.other_relative {
+                for (code, value) in &passthrough_wheel {
                     self.mouse.relative(*code, *value);
                 }
                 emit_scroll(gesture, |code, value| self.mouse.relative(code, value));
@@ -1497,7 +1566,7 @@ impl Runtime {
                 let wheel: &[(u16, i32)] = if *stroke_active {
                     &[]
                 } else {
-                    &report.other_relative
+                    &passthrough_wheel
                 };
                 let clicks: &[(u16, bool)] = if self.tablet_clicks { &keys } else { &[] };
                 if !wheel.is_empty() || !clicks.is_empty() || gesture.any() {

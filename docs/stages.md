@@ -291,7 +291,10 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | `mode` | enum | `drag` (default) · `joystick` |
 | `freeze_cursor` | bool | Swipe (true) versus hand tool (false). Every mode honours it |
 | `full_release_stops_momentum` | bool | Chord bindings only — see below |
-| `passthrough` | bool | Let the bound button keep its ordinary job as well |
+| `mouse_passthrough` | enum | `always` · `unless_active` (default) · `reserved` |
+| `wheel_modifier` | binding | Hold to route your own wheel through this stage |
+| `take_wheel` | bool | Required for `wheel_modifier` to do anything |
+| `wheel_gain` | f64 | Output notches per wheel notch while taken |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
 | `speed` | f64 | Notches per millimetre of hand travel. Higher is faster |
@@ -304,12 +307,30 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 losing its tuning; a second way to say the same thing reads as a setting that does
 something the user has not been told about. Removed after exactly that confusion.
 
-**A button bound to a gesture is consumed by it** by default and does not also do its
-ordinary job — otherwise binding the middle button to autoscroll also pastes, which reads
-as the gesture firing when it should not. `passthrough` asks for both, which is worth
-having: middle-click paste alongside a middle-click gesture is a real thing to want. The
-pen button is never consumed either way, since a preset that bound it would silently lose
-the ability to draw.
+**What a bound mouse button still does is a three-way choice**, and the middle one is the
+default because it costs the user nothing:
+
+| | |
+|---|---|
+| `always` | The button keeps its usual job entirely. Both happen |
+| `unless_active` | Usual job *except* in the combination bound — with `alt+middle`, a plain middle click still pastes, and middle-with-alt does not |
+| `reserved` | The button belongs to the binding and does nothing else |
+
+Named for the mouse deliberately: **keyboard keys are never taken**, because this daemon
+does not emit them, and a setting implying otherwise would claim control over a device the
+project refuses to grab. The pen button is never taken either, since a preset that bound it
+would silently lose the ability to draw.
+
+### The wheel goes through the pipeline, and comes out again untouched
+
+`wheel_modifier` hands your own wheel to this stage while it is held, so an existing wheel
+picks up the stage's speed and momentum — hold it, flick, and the page carries on.
+
+**Unclaimed wheel movement is never altered.** It enters the pipeline, no stage takes it,
+and the daemon emits exactly what came back — including horizontal wheel, hi-res, and any
+unusual axis a device happens to carry. Routing the wheel through the filters must never
+become a new way to lose scrolling, so a stage that takes it must *clear* what it took, and
+anything left is passed on verbatim.
 
 - **`drag`** — touchscreen-style swipe. While held, hand motion scrolls directly and
   the cursor is frozen, as a finger on glass has no cursor to move. **This is the only

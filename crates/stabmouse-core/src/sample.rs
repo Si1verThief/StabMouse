@@ -49,6 +49,20 @@ pub struct Sample {
     /// go of one and it coasts, let go of both and it stops".
     pub scroll_partial: bool,
 
+    /// Physical wheel movement arriving with this sample, in notches — vertical then
+    /// horizontal, positive up and right.
+    ///
+    /// **A stage that does nothing with these must leave them alone**, and the daemon emits
+    /// whatever is left verbatim. That is what keeps an untouched wheel exactly as good as it
+    /// was before any of this existed: routing it through the pipeline must never be able to
+    /// swallow it by accident.
+    pub wheel_v: f64,
+    pub wheel_h: f64,
+
+    /// Whether a stage may take the wheel this sample — the daemon's answer to whether the
+    /// binding that claims it is engaged.
+    pub wheel_claimed: bool,
+
     /// Scroll the pipeline decided to produce, in wheel notches, positive up and right.
     ///
     /// An **output** of the `scroll` stage rather than an input. The core cannot emit events
@@ -98,6 +112,9 @@ impl Sample {
             stroke_end: false,
             scrolling: false,
             scroll_partial: false,
+            wheel_v: 0.0,
+            wheel_h: 0.0,
+            wheel_claimed: false,
             scroll_x: 0.0,
             scroll_y: 0.0,
             constrain: false,

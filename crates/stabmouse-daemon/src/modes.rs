@@ -25,8 +25,10 @@ pub struct Mode {
     /// button is free depends on what the hand is doing — and each inner list must be held
     /// together, so `Ctrl+A+Middle` is one binding rather than three.
     pub modifier: Vec<Vec<u16>>,
-    /// Let a bound button do its ordinary job as well as driving the gesture.
-    pub pass_through: bool,
+    /// Chords that hand the physical wheel to the scroll stage while held.
+    pub wheel_binding: Vec<Vec<u16>>,
+    /// What a bound mouse button still does for the application.
+    pub passthrough: stabmouse_config::Passthrough,
 }
 
 pub struct Modes {
@@ -221,7 +223,8 @@ mod tests {
                 pipeline: Pipeline::new(vec![]),
                 modifier: Vec::new(),
                 scroll_button: Vec::new(),
-                pass_through: false,
+                wheel_binding: Vec::new(),
+                passthrough: Default::default(),
             })
             .collect();
         Modes::new(slots, 0)

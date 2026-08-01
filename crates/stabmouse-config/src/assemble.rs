@@ -213,9 +213,12 @@ fn build_scroll(p: &mut Params) -> Scroll {
     scroll.freeze_cursor = p.bool("freeze_cursor", scroll.freeze_cursor);
     scroll.full_release_stops_momentum =
         p.bool("full_release_stops_momentum", scroll.full_release_stops_momentum);
-    // Read here so it is not reported as unknown; the daemon is what acts on it, since only
-    // the daemon decides what reaches a sink.
-    let _ = p.bool("passthrough", false);
+    scroll.take_wheel = p.bool("take_wheel", scroll.take_wheel);
+    scroll.wheel_gain = p.f64("wheel_gain", scroll.wheel_gain);
+    // Resolved by the daemon — turning names into codes is platform work, and deciding what
+    // reaches a sink is not a filter's business.
+    let _ = p.str("wheel_modifier", "");
+    let _ = p.str("mouse_passthrough", "");
     scroll.momentum = p.bool("momentum", scroll.momentum);
     scroll.momentum_decay_s = p.f64("momentum_decay_ms", scroll.momentum_decay_s * 1000.0) / 1000.0;
     // Resolved by the daemon, for the same reason `snap.modifier` is: turning a name into an

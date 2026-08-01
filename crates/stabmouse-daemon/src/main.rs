@@ -554,7 +554,12 @@ fn run(
     let keyboard_codes: Vec<u16> = modes
         .slots()
         .iter()
-        .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()))
+        .flat_map(|m| {
+            m.modifier
+                .iter()
+                .chain(m.scroll_button.iter())
+                .chain(m.wheel_binding.iter())
+        })
         .flatten()
         .copied()
         .filter(|c| !stabmouse_input::is_mouse_button(*c))
@@ -761,7 +766,8 @@ fn build_modes(
             pipeline: stabmouse_core::Pipeline::new(vec![]),
             modifier: Vec::new(),
             scroll_button: Vec::new(),
-            pass_through: false,
+            wheel_binding: Vec::new(),
+            passthrough: Default::default(),
         }];
     };
 
@@ -785,7 +791,8 @@ fn build_modes(
                 pipeline: stabmouse_core::Pipeline::new(vec![]),
                 modifier: Vec::new(),
                 scroll_button: Vec::new(),
-                pass_through: false,
+                wheel_binding: Vec::new(),
+                passthrough: Default::default(),
             });
             continue;
         };
@@ -811,10 +818,8 @@ fn build_modes(
             pipeline: assembly.pipeline,
             modifier: stage_bindings(preset, &m.preset, "snap", "modifier"),
             scroll_button: stage_bindings(preset, &m.preset, "scroll", "button"),
-            // Consuming a bound button is the default, since a gesture that also pastes is
-            // not one gesture. A preset may ask for both.
-            pass_through: stage_flag(preset, "scroll", "passthrough")
-                || stage_flag(preset, "snap", "passthrough"),
+            wheel_binding: stage_bindings(preset, &m.preset, "scroll", "wheel_modifier"),
+            passthrough: stage_passthrough(preset),
         });
     }
     out
@@ -876,15 +881,32 @@ fn stage_bindings(
         .collect()
 }
 
-/// A boolean a preset's stage carries, defaulting to false.
-fn stage_flag(preset: &stabmouse_config::Preset, stage: &str, param: &str) -> bool {
-    preset
-        .stages
-        .iter()
-        .find(|s| s.kind == stage)
-        .and_then(|s| s.params.get(param))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+/// What the preset asks to happen to bound mouse buttons.
+///
+/// Read across every stage that binds one, taking the most permissive answer: a preset that
+/// says "always" anywhere means the user has asked for a button back, and quietly overruling
+/// that from another stage would be the surprise this setting exists to avoid.
+fn stage_passthrough(preset: &stabmouse_config::Preset) -> stabmouse_config::Passthrough {
+    use stabmouse_config::Passthrough;
+    let mut result = Passthrough::default();
+    for entry in &preset.stages {
+        let Some(value) = entry.params.get("mouse_passthrough").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let asked = match value {
+            "always" => Passthrough::Always,
+            "reserved" => Passthrough::Reserved,
+            _ => Passthrough::UnlessActive,
+        };
+        result = match (result, asked) {
+            (Passthrough::Always, _) | (_, Passthrough::Always) => Passthrough::Always,
+            (Passthrough::UnlessActive, _) | (_, Passthrough::UnlessActive) => {
+                Passthrough::UnlessActive
+            }
+            _ => Passthrough::Reserved,
+        };
+    }
+    result
 }
 
 struct Source {
