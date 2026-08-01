@@ -67,6 +67,14 @@ pub enum Command {
     Status,
     /// Re-read the config now, rather than waiting for the mtime poll to notice.
     Reload,
+    /// Switch to a different profile by slug, rebuilding every mode slot.
+    Profile(String),
+    /// Report the next button pressed on the source device instead of acting on it.
+    ///
+    /// The only way a frontend can learn which mouse button the user pressed: the daemon holds
+    /// an exclusive grab, so those events reach nothing else. A window asking "press the button
+    /// you want" has to ask the daemon to watch for it.
+    CaptureBinding,
 }
 
 impl Command {
@@ -85,6 +93,12 @@ impl Command {
             },
             "quit" | "stop" => Some(Self::Quit),
             "reload" => Some(Self::Reload),
+            // The rest of the line, so a slug may contain anything a filename can.
+            "profile" => {
+                let rest = line.trim().strip_prefix("profile")?.trim();
+                (!rest.is_empty()).then(|| Self::Profile(rest.to_string()))
+            }
+            "capture" => Some(Self::CaptureBinding),
             "status" => Some(Self::Status),
             _ => None,
         }
@@ -101,6 +115,8 @@ impl Command {
             Self::Quit => "quit".into(),
             Self::Status => "status".into(),
             Self::Reload => "reload".into(),
+            Self::Profile(name) => format!("profile {name}"),
+            Self::CaptureBinding => "capture".into(),
         }
     }
 }

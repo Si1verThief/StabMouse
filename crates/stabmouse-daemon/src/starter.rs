@@ -218,7 +218,7 @@ default_mode = 1
 #   [[stage]]
 #   type = "snap"
 #   divisions = 8            # 4 locks to the axes, 8 adds the diagonals
-#   modifier = "BTN_SIDE"    # a spare mouse button, or a key like "KEY_LEFTSHIFT"
+#   modifier = "BTN_SIDE"    # or a list: ["BTN_SIDE", "KEY_LEFTSHIFT"] — any of them engages
 #
 # A mouse button costs nothing extra — those events already arrive on the grabbed mouse. A
 # keyboard key makes the daemon open your keyboard read-only to watch that one key; it never

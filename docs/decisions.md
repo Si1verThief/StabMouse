@@ -1078,6 +1078,19 @@ first-class option rather than a fallback: the grabbed device's buttons are alre
 front of us, so a side-button binding adds no capability at all. Users with a spare side
 button should prefer it, and the config's example uses one.
 
+**A binding is a *list*, and it is captured rather than typed.** Two additions from use:
+
+- **Several names may be bound, and any of them engages.** One binding is a guess about
+  which hand is free — a thumb button while the mouse hand is busy, a modifier key while
+  it is not — and forcing a choice between them is a worse answer than accepting both. A
+  single name still reads in the file exactly as it did.
+- **Press-to-bind belongs to the daemon**, because nothing else can see the buttons. The
+  daemon holds an exclusive grab on the source device, so a frontend asking "press the
+  button you want" would watch for something that never arrives. `CaptureBinding` puts the
+  daemon in a short listening window; the next press is reported and **swallowed**, along
+  with its release — otherwise binding the middle button would paste while you bound it,
+  and an application would see a button-up it never saw pressed.
+
 **Consequences:**
 
 - The binding is resolved to an evdev code **once at mode build time**. A name-to-code

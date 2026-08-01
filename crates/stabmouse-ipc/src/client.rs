@@ -138,6 +138,19 @@ impl Client {
 
     // ------------------------------------------------------------------ Config
 
+    /// Ask the daemon to report the next button pressed instead of acting on it.
+    ///
+    /// The daemon holds an exclusive grab, so a frontend cannot see the source device's
+    /// buttons itself — press-to-bind has to be asked for rather than observed.
+    pub fn capture_binding(&self) -> Result<()> {
+        self.call(DAEMON_INTERFACE, "CaptureBinding", &())
+    }
+
+    /// Collect a captured button name, or empty while still waiting.
+    pub fn take_captured_binding(&self) -> Result<String> {
+        self.call(DAEMON_INTERFACE, "TakeCapturedBinding", &())
+    }
+
     pub fn reload(&self) -> Result<()> {
         self.call(CONFIG_INTERFACE, "Reload", &())
     }

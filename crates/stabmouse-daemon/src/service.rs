@@ -155,6 +155,8 @@ struct Daemon {
     /// Inspection verdicts by window class, so a layout resend — which happens per frame
     /// while a window is being dragged — costs rectangle bookkeeping, not `/proc` reads.
     class_signals: Arc<Mutex<std::collections::HashMap<String, Option<crate::focus::Signal>>>>,
+    /// Filled by the input loop when a binding capture completes.
+    captured: Arc<Mutex<Option<String>>>,
 }
 
 struct Devices {
@@ -215,10 +217,31 @@ impl Daemon {
         Ok(s.mode_slot % total + 1)
     }
 
-    fn set_profile(&self, _name: String) -> zbus::fdo::Result<()> {
-        Err(zbus::fdo::Error::NotSupported(
-            "switching profile at runtime is not implemented yet".into(),
-        ))
+    fn set_profile(&self, name: String) -> zbus::fdo::Result<()> {
+        if name.trim().is_empty() {
+            return Err(zbus::fdo::Error::InvalidArgs("a profile slug is required".into()));
+        }
+        dispatch(Command::Profile(name))
+    }
+
+    /// Ask the daemon to report the next button pressed rather than acting on it.
+    ///
+    /// A frontend cannot see these itself: the daemon holds an exclusive grab on the source
+    /// device, so its buttons reach nothing else. Press-to-bind therefore has to be asked for.
+    fn capture_binding(&self) -> zbus::fdo::Result<()> {
+        dispatch(Command::CaptureBinding)
+    }
+
+    /// Collect a captured button name, if one has arrived. Empty while still waiting.
+    ///
+    /// Taken rather than read, so the same press cannot be bound twice by two callers or by
+    /// one caller polling.
+    fn take_captured_binding(&self) -> String {
+        self.captured
+            .lock()
+            .ok()
+            .and_then(|mut c| c.take())
+            .unwrap_or_default()
     }
 
     /// Enabled maps onto panic's inert state: both mean "stop filtering, leave the devices
@@ -480,6 +503,7 @@ pub fn output_degraded(conn: &zbus::blocking::Connection, reason: &str) {
 pub fn serve(
     state: Published,
     focus: crate::focus::Focus,
+    captured: Arc<Mutex<Option<String>>>,
 ) -> zbus::Result<zbus::blocking::Connection> {
     zbus::blocking::connection::Builder::session()?
         .name(BUS_NAME)?
@@ -490,6 +514,7 @@ pub fn serve(
                 focus,
                 scanned: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 class_signals: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                captured,
             },
         )?
         .serve_at(OBJECT_PATH, Devices { state: state.clone() })?
@@ -536,6 +561,7 @@ mod tests {
             focus: Default::default(),
             scanned: Default::default(),
             class_signals: Default::default(),
+            captured: Default::default(),
         };
         let s = d.state.read();
         let total = s.modes.len() as u32;
@@ -549,6 +575,7 @@ mod tests {
             focus: Default::default(),
             scanned: Default::default(),
             class_signals: Default::default(),
+            captured: Default::default(),
         };
         let s = d.state.read();
         assert_eq!(s.mode_slot % s.modes.len() as u32 + 1, 2);

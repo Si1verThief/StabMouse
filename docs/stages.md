@@ -246,7 +246,7 @@ line, `stabilize` reshapes the line entirely.
 | `tolerance_deg` | f64 | Defaults to half a division, so a lock locks |
 | `strength` | f64 | 0–1; soft snap rather than hard lock |
 | `activation` | enum | `modifier` (default) · `always` |
-| `modifier` | binding | Key or button that engages it — `BTN_SIDE`, `KEY_LEFTSHIFT` |
+| `modifier` | binding | Key or button that engages it, or a list of them — `BTN_SIDE`, `["BTN_SIDE", "KEY_LEFTSHIFT"]` |
 
 Modifier-held by default, the way Photoshop's shift-constrain works. **The binding may be
 a mouse button or a keyboard key**, chosen per mode — see D24 for what each costs.

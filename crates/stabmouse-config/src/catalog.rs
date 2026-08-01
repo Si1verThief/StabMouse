@@ -42,7 +42,9 @@ pub enum ParamKind {
         default: &'static str,
         options: &'static [&'static str],
     },
-    /// A key or button name — `BTN_SIDE`, `KEY_LEFTSHIFT`. Resolved by the daemon (D24).
+    /// A key or button name — `BTN_SIDE`, `KEY_LEFTSHIFT` — or a list of them, any of which
+    /// engages. Resolved by the daemon (D24), which is also the only thing that can *capture*
+    /// one: it holds an exclusive grab, so the source device's buttons reach nothing else.
     Binding,
 }
 

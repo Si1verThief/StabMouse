@@ -59,6 +59,12 @@ const ADOPT_IDLE: Duration = Duration::from_millis(150);
 /// not free — it opens every node under `/dev/input` — so this is deliberately not eager.
 const RECONNECT_POLL: Duration = Duration::from_millis(1000);
 
+/// How long the daemon watches for a button after a frontend asks it to.
+///
+/// Long enough to reach for an awkward thumb button, short enough that a window closed
+/// mid-bind does not leave the mouse swallowing a click a minute later.
+const CAPTURE_WINDOW: Duration = Duration::from_secs(8);
+
 pub struct Runtime {
     /// The source device, absent while it is disconnected.
     ///
@@ -114,6 +120,14 @@ pub struct Runtime {
     pub scroll_freeze: Duration,
     /// When the current freeze ends, if one is running.
     pub frozen_until: Option<Instant>,
+    /// A profile switch waiting for the next reload to pick it up.
+    pub requested_profile: Option<String>,
+    /// While set, the next button press is reported rather than acted on.
+    pub capture_until: Option<Instant>,
+    /// The captured button's name, waiting for a frontend to collect it.
+    pub captured: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// A button whose release must be swallowed, having swallowed its press.
+    pub swallow_release: Option<u16>,
     /// Fractional scroll owed to each wheel axis, kept separately per resolution.
     ///
     /// The `scroll` stage produces fractional notches, and both wheel axes are integers with
@@ -213,7 +227,7 @@ impl Runtime {
     pub fn run(
         &mut self,
         signals: &Signals,
-        mut reload: impl FnMut() -> Option<Reloaded>,
+        mut reload: impl FnMut(Option<&str>) -> Option<Reloaded>,
         mut reopen: impl FnMut() -> Option<Capture>,
         config_dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Stats> {
@@ -350,6 +364,15 @@ impl Runtime {
                         Command::Mode(n) => {
                             self.act(Action::Select(n), &mut stats, stroke_active)
                         }
+                        // Handled through the same reload the config watch uses, so there is
+                        // one path that rebuilds modes and swaps them in rather than two that
+                        // could disagree about what a rebuild involves.
+                        Command::Profile(name) => {
+                            self.requested_profile = Some(name);
+                            reload_requested = true;
+                        }
+                        Command::CaptureBinding => self.capture_until =
+                            Some(Instant::now() + CAPTURE_WINDOW),
                     }
                 }
             }
@@ -501,13 +524,14 @@ impl Runtime {
 
             if (edited || reload_requested) && config_dir.is_some() {
                 reload_requested = false;
+                let wanted = self.requested_profile.take();
                 // Kept current even on the watch path, so switching to the poll fallback after
                 // a failure does not immediately re-fire on a change already handled.
                 last_mtime = config_dir.as_deref().and_then(newest_mtime);
 
                 // A failed reload leaves the running config alone rather than dropping to
                 // passthrough, so a typo mid-edit cannot take the pointer away.
-                if let Some(fresh) = reload() {
+                if let Some(fresh) = reload(wanted.as_deref()) {
                     self.modes = fresh.modes;
                     self.tablets
                         .set_destroy_on_leave(fresh.destroy_tablet_on_leave);
@@ -892,6 +916,38 @@ impl Runtime {
         }
     }
 
+    /// While capturing, take the first button press for the frontend and swallow it.
+    ///
+    /// Swallowed on purpose: the press that names a binding must not also *do* whatever that
+    /// button normally does, or binding the middle button would paste while you bound it.
+    /// Returns whether this report was consumed.
+    fn capture_button(&mut self, report: &Report) -> bool {
+        let Some(until) = self.capture_until else {
+            return false;
+        };
+        if Instant::now() >= until {
+            self.capture_until = None;
+            return false;
+        }
+        // The press, not the release: a release would arrive after the user had already let
+        // go, and reads as the binding being registered late.
+        let Some((code, _)) = report.keys.iter().find(|(_, pressed)| *pressed) else {
+            return false;
+        };
+        // `Debug` renders the evdev name — `BTN_SIDE` — which is exactly the string the
+        // config takes, so a captured binding round-trips without a translation table.
+        let name = format!("{:?}", evdev::KeyCode::new(*code));
+        if let Ok(mut slot) = self.captured.lock() {
+            *slot = Some(name.clone());
+        }
+        self.capture_until = None;
+        println!("captured binding: {name}");
+        // Swallow the release too, which arrives in a later report — otherwise the
+        // application under the cursor sees a button-up it never saw pressed.
+        self.swallow_release = Some(*code);
+        true
+    }
+
     fn track_button(&mut self, report: &Report, stroke_active: &mut bool) {
         for (code, pressed) in &report.keys {
             if *code == self.pen_button {
@@ -915,24 +971,31 @@ impl Runtime {
     /// listener. A mode that binds nothing is never constrained, which is what makes `snap`
     /// with `activation = "modifier"` and no binding inert rather than stuck on.
     fn constrain_held(&self) -> bool {
-        self.binding_held(self.modes.current().and_then(|m| m.modifier))
+        match self.modes.current() {
+            Some(mode) => self.any_held(&mode.modifier),
+            None => false,
+        }
     }
 
-    /// Whether the current mode's scroll-gesture button is held.
+    /// Whether any of the current mode's scroll-gesture buttons is held.
     fn scroll_held(&self) -> bool {
-        self.binding_held(self.modes.current().and_then(|m| m.scroll_button))
+        match self.modes.current() {
+            Some(mode) => self.any_held(&mode.scroll_button),
+            None => false,
+        }
     }
 
     /// A mouse button is answered from the grabbed device's own state; a keyboard key from
-    /// the listener. A binding of `None` is never held, which is what makes a stage that
-    /// waits for one inert rather than stuck on when nothing is bound.
-    fn binding_held(&self, code: Option<u16>) -> bool {
-        let Some(code) = code else { return false };
-        if stabmouse_input::is_mouse_button(code) {
-            self.buttons_held.contains(&code)
-        } else {
-            self.listener.as_ref().is_some_and(|l| l.is_held(code))
-        }
+    /// the listener. An empty list is never held, which is what makes a stage that waits for
+    /// a binding inert rather than stuck on when nothing is bound.
+    fn any_held(&self, codes: &[u16]) -> bool {
+        codes.iter().any(|code| {
+            if stabmouse_input::is_mouse_button(*code) {
+                self.buttons_held.contains(code)
+            } else {
+                self.listener.as_ref().is_some_and(|l| l.is_held(*code))
+            }
+        })
     }
 
     fn handle(
@@ -941,6 +1004,20 @@ impl Runtime {
         t_us: u64,
         stroke_active: &mut bool,
     ) -> anyhow::Result<()> {
+        if self.capture_button(report) {
+            return Ok(());
+        }
+        // The other half of swallowing a captured press: its release belongs to a press no
+        // application ever saw.
+        if let Some(code) = self.swallow_release {
+            if report.keys.iter().any(|(c, pressed)| *c == code && !*pressed) {
+                self.swallow_release = None;
+                if report.dx == 0 && report.dy == 0 && report.other_relative.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+
         self.track_button(report, stroke_active);
 
         // Net source movement since a sink last carried anything, for the stall check. Raw

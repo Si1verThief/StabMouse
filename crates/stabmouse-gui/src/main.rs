@@ -270,7 +270,17 @@ fn apply_presets(app: &App, selected: usize) {
                         }
                         ParamKind::Binding => {
                             row.kind = "binding".into();
-                            row.choice = stored.map(|s| s.text.clone()).unwrap_or_default().into();
+                            // Reuses `options` as the list of bound names: a binding is now
+                            // several, and the chip control shows each with its own remove.
+                            let names = stored
+                                .map(|s| presets::binding_names(&s.raw))
+                                .unwrap_or_default();
+                            row.options = ModelRc::from(Rc::new(VecModel::from(
+                                names
+                                    .iter()
+                                    .map(|n| SharedString::from(n.clone()))
+                                    .collect::<Vec<_>>(),
+                            )));
                         }
                     }
                     out.push(row);
@@ -736,6 +746,95 @@ fn main() -> Result<(), slint::PlatformError> {
             apply_profiles(&app, selected)
         );
         show_undo(&app, &hist);
+    });
+
+    // ------------------------------------------------------------ press-to-bind
+    //
+    // The daemon watches for the button, because it holds the grab and we cannot see it. This
+    // side polls for the answer and stops on the first of: a capture, a cancel, or a timeout
+    // matching the daemon's own window — a control that waits forever is one the user cannot
+    // tell from a broken one.
+    let weak = app.as_weak();
+    let hist = history.clone();
+    app.on_listen_binding(move |stage_index, key| {
+        let Some(app) = weak.upgrade() else { return };
+        if Client::connect().and_then(|c| c.capture_binding()).is_err() {
+            notice(&app, "no daemon is running, so it cannot watch for a button");
+            return;
+        }
+        app.set_listening_for(format!("{stage_index}/{key}").into());
+
+        let weak = app.as_weak();
+        let hist = hist.clone();
+        let key = key.to_string();
+        let mut waited = std::time::Duration::ZERO;
+        let poll = std::time::Duration::from_millis(80);
+        // The daemon gives up after 8s; matching that keeps the two ends agreeing about
+        // whether a capture is still live.
+        let limit = std::time::Duration::from_secs(8);
+        slint::Timer::default().start(
+            slint::TimerMode::Repeated,
+            poll,
+            move || {
+                let Some(app) = weak.upgrade() else { return };
+                // Cancelled from elsewhere — Escape, or the button.
+                if app.get_listening_for().is_empty() {
+                    return;
+                }
+                waited += poll;
+                let got = Client::connect()
+                    .and_then(|c| c.take_captured_binding())
+                    .unwrap_or_default();
+                if !got.is_empty() {
+                    app.set_listening_for(Default::default());
+                    if let Some(path) = selected_preset_path(&app) {
+                        remember(&hist, &path, "add binding");
+                        let selected = app.get_selected_preset().max(0) as usize;
+                        after!(
+                            app,
+                            presets::add_binding(&path, stage_index.max(0) as usize, &key, &got),
+                            apply_presets(&app, selected)
+                        );
+                        show_undo(&app, &hist);
+                    }
+                } else if waited >= limit {
+                    app.set_listening_for(Default::default());
+                    notice(&app, "nothing was pressed, so nothing was bound");
+                }
+            },
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_cancel_listen(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_listening_for(Default::default());
+            app.set_notice(Default::default());
+        }
+    });
+
+    let weak = app.as_weak();
+    let hist = history.clone();
+    app.on_remove_binding(move |stage_index, key, name| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "remove binding");
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::remove_binding(&path, stage_index.max(0) as usize, key.as_str(), name.as_str()),
+            apply_presets(&app, selected)
+        );
+        show_undo(&app, &hist);
+    });
+
+    // Switching profile is a daemon action rather than a file edit, so it goes over the bus
+    // and the dashboard's own refresh reports the result.
+    let weak = app.as_weak();
+    app.on_switch_profile(move |slug| {
+        if let Some(app) = weak.upgrade() {
+            act(&app, |c| c.set_profile(slug.as_str()));
+        }
     });
 
     let weak = app.as_weak();

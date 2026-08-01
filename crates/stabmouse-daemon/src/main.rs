@@ -462,7 +462,9 @@ fn run(
     // A bus failure is not fatal. The daemon's job is filtering input, and it does that with no
     // bus at all — a session without D-Bus should lose the CLI and GUI, not the mouse.
     let focus = focus::Focus::default();
-    match service::serve(published.clone(), focus.clone()) {
+    // Shared with the D-Bus thread, which is where a frontend collects a captured binding.
+    let captured: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    match service::serve(published.clone(), focus.clone(), captured.clone()) {
         Ok(conn) => {
             println!("  D-Bus: {}", stabmouse_ipc::BUS_NAME);
             // Signals are emitted here, on their own thread. The input loop must never make a
@@ -552,8 +554,7 @@ fn run(
     let keyboard_codes: Vec<u16> = modes
         .slots()
         .iter()
-        .flat_map(|m| [m.modifier, m.scroll_button])
-        .flatten()
+        .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()).copied())
         .filter(|c| !stabmouse_input::is_mouse_button(*c))
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
@@ -621,6 +622,10 @@ fn run(
             store.startup_profile().map_or(250, |p| p.scroll_freeze_ms),
         ),
         frozen_until: None,
+        requested_profile: None,
+        capture_until: None,
+        captured: captured.clone(),
+        swallow_release: None,
         scroll_carry: Default::default(),
         inert: false,
     };
@@ -644,10 +649,15 @@ fn run(
 
     let reload_dir = dir.clone();
     let reload_identity = source.identity.clone();
-    let reload_profile = profile.clone();
+    let mut reload_profile = profile.clone();
     let stats = rt.run(
         &signals,
-        move || {
+        move |wanted: Option<&str>| {
+            // A profile switch and a config edit are the same operation — rebuild every slot
+            // and swap — so they share one path rather than two that could disagree.
+            if let Some(name) = wanted {
+                reload_profile = Some(name.to_string());
+            }
             // A failed reload leaves the running modes alone rather than dropping to
             // passthrough mid-stroke.
             match Store::load(&reload_dir) {
@@ -728,8 +738,8 @@ fn build_modes(
             output: stabmouse_config::Output::Mouse,
             preset: stabmouse_config::RAW.into(),
             pipeline: stabmouse_core::Pipeline::new(vec![]),
-            modifier: None,
-            scroll_button: None,
+            modifier: Vec::new(),
+            scroll_button: Vec::new(),
         }];
     };
 
@@ -751,8 +761,8 @@ fn build_modes(
                 output: m.output,
                 preset: m.preset.clone(),
                 pipeline: stabmouse_core::Pipeline::new(vec![]),
-                modifier: None,
-                scroll_button: None,
+                modifier: Vec::new(),
+                scroll_button: Vec::new(),
             });
             continue;
         };
@@ -776,8 +786,8 @@ fn build_modes(
             output: m.output,
             preset: m.preset.clone(),
             pipeline: assembly.pipeline,
-            modifier: stage_binding(preset, &m.preset, "snap", "modifier"),
-            scroll_button: stage_binding(preset, &m.preset, "scroll", "button"),
+            modifier: stage_bindings(preset, &m.preset, "snap", "modifier"),
+            scroll_button: stage_bindings(preset, &m.preset, "scroll", "button"),
         });
     }
     out
@@ -788,24 +798,45 @@ fn build_modes(
 /// Read from the raw preset rather than from the assembled pipeline: turning a name into a
 /// code is platform work, and `stabmouse-config` builds for wasm and PyO3 where no such table
 /// exists. A stage knows *whether* it waits for a binding; the daemon knows *which*.
-fn stage_binding(
+/// **A parameter may bind several buttons, and any of them engages the gesture.**
+///
+/// One binding is a guess about which hand is free. Someone may want a thumb button while the
+/// mouse hand is busy and a modifier key while it is not, and forcing a choice between them
+/// is a worse answer than accepting both. A single string still works — the common case reads
+/// the same as it always did.
+fn stage_bindings(
     preset: &stabmouse_config::Preset,
     slug: &str,
     stage: &str,
     param: &str,
-) -> Option<u16> {
-    let entry = preset.stages.iter().find(|s| s.kind == stage)?;
-    let name = entry.params.get(param)?.as_str()?;
-    match stabmouse_input::code_for(name) {
-        Some(code) => Some(code),
-        None => {
-            eprintln!(
-                "preset '{slug}': '{name}' is not a key or button name; \
-                 {stage} will not engage"
-            );
-            None
-        }
-    }
+) -> Vec<u16> {
+    let Some(entry) = preset.stages.iter().find(|s| s.kind == stage) else {
+        return Vec::new();
+    };
+    let Some(value) = entry.params.get(param) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = match value {
+        toml::Value::String(one) => vec![one.clone()],
+        toml::Value::Array(many) => many
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    names
+        .iter()
+        .filter_map(|name| match stabmouse_input::code_for(name) {
+            Some(code) => Some(code),
+            None => {
+                eprintln!(
+                    "preset '{slug}': '{name}' is not a key or button name; \
+                     {stage} will not engage on it"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 struct Source {

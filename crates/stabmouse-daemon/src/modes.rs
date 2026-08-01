@@ -14,13 +14,14 @@ pub struct Mode {
     /// Built up front. Switching is an index change, never a config load — the pipeline for
     /// every slot is resident before the hotkey is ever pressed.
     pub pipeline: Pipeline,
-    /// evdev code of this mode's scroll-gesture button, when its preset binds one.
-    pub scroll_button: Option<u16>,
-    /// evdev code of this mode's constrain modifier, when its preset binds one.
+    /// evdev codes of this mode's scroll-gesture buttons. Any of them engages it.
+    pub scroll_button: Vec<u16>,
+    /// evdev codes of this mode's constrain modifiers. Any of them engages it.
     ///
     /// Resolved once at build time rather than per sample: the name-to-code lookup is a string
-    /// comparison against the whole evdev table, which has no business on the hot path.
-    pub modifier: Option<u16>,
+    /// comparison against the whole evdev table, which has no business on the hot path. A list
+    /// rather than one, because which button is free depends on what the hand is doing.
+    pub modifier: Vec<u16>,
 }
 
 pub struct Modes {
@@ -213,8 +214,8 @@ mod tests {
                 },
                 preset: "raw".into(),
                 pipeline: Pipeline::new(vec![]),
-                modifier: None,
-                scroll_button: None,
+                modifier: Vec::new(),
+                scroll_button: Vec::new(),
             })
             .collect();
         Modes::new(slots, 0)

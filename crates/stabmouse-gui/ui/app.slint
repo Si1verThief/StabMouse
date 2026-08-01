@@ -317,6 +317,91 @@ component Field inherits Rectangle {
     }
 }
 
+// Press-to-bind. Best practice for this control is unglamorous and mostly about honesty:
+// say plainly that it is listening, name what it captured, let Escape out, and never leave
+// the user unable to tell whether it heard them.
+//
+// **Multiple bindings per parameter**, because one is a guess about which hand is free. Any
+// of them engages the gesture; a chip removes the one it names.
+component BindingControl inherits VerticalLayout {
+    in property <[string]> bound;
+    in property <bool> listening;
+    callback listen();
+    callback cancel();
+    callback remove(string);
+
+    spacing: 4px;
+
+    HorizontalLayout {
+        spacing: 4px;
+        alignment: start;
+
+        for name in bound: Rectangle {
+            height: 26px;
+            border-radius: Theme.radius-control;
+            border-width: 1px;
+            border-color: Theme.accent.with-alpha(0.45);
+            background: Theme.accent.with-alpha(0.12);
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 6px;
+                spacing: 6px;
+                Text {
+                    text: name;
+                    font-family: "monospace";
+                    font-size: Theme.size-muted;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "×";
+                    font-size: Theme.size-base;
+                    color: chip.has-hover ? Theme.error : Theme.muted;
+                    vertical-alignment: center;
+                }
+            }
+            chip := TouchArea { clicked => { root.remove(name); } }
+        }
+
+        if root.bound.length == 0 && !root.listening: Text {
+            text: "nothing bound";
+            font-size: Theme.size-muted;
+            color: Theme.muted;
+            vertical-alignment: center;
+            height: 26px;
+        }
+
+        if !root.listening: Button {
+            label: root.bound.length == 0 ? "Bind…" : "Add…";
+            clicked => { root.listen(); }
+        }
+
+        // While listening the control says so, says how to stop, and offers the way out —
+        // a control that silently waits is one the user cannot tell from a broken one.
+        if root.listening: Rectangle {
+            height: 26px;
+            border-radius: Theme.radius-control;
+            border-width: 1px;
+            border-color: Theme.accent;
+            background: Theme.accent.with-alpha(0.15);
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                Text {
+                    text: "Press a button or key…  (Esc to cancel)";
+                    font-size: Theme.size-muted;
+                    color: Theme.accent;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        if root.listening: Button {
+            label: "Cancel";
+            clicked => { root.cancel(); }
+        }
+    }
+}
+
 // A slider track, hand-rolled to match the rest rather than importing a widget set whose
 // metrics and colours would not follow Theme.
 component Track inherits Rectangle {
@@ -479,6 +564,8 @@ export component App inherits Window {
 
     in property <string> notice;
     in property <string> undo-label;
+    // Which parameter is currently listening, as "stageIndex/key", empty when none.
+    in-out property <string> listening-for;
 
     property <string> page: "dashboard";
     property <bool> show-keys: false;
@@ -507,6 +594,21 @@ export component App inherits Window {
     callback set-slot-field(int, string, string);
     callback set-default-slot(int);
     callback undo();
+    callback listen-binding(int, string);
+    callback cancel-listen();
+    callback remove-binding(int, string, string);
+    callback switch-profile(string);
+
+    // Escape leaves press-to-bind, which is the way out every capture control owes the user.
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape && listening-for != "") {
+                cancel-listen();
+                return accept;
+            }
+            reject
+        }
+    }
 
     HorizontalLayout {
         // -------------------------------------------------------------- sidebar
@@ -944,7 +1046,7 @@ export component App inherits Window {
                                     }
 
                                     if !pr.is-header && pr.kind != "float": HorizontalLayout {
-                                        height: 36px;
+                                        height: pr.kind == "binding" ? 44px : 36px;
                                         spacing: 0px;
                                         Rectangle { width: 10px; }
                                         Rectangle {
@@ -978,11 +1080,12 @@ export component App inherits Window {
                                             chosen: pr.choice;
                                             picked(v) => { set-param-text(pr.stage-index, pr.key, v); }
                                         }
-                                        if pr.kind == "binding": Field {
-                                            width: 180px;
-                                            text: pr.choice;
-                                            placeholder: "BTN_SIDE / KEY_LEFTSHIFT";
-                                            committed(v) => { set-param-text(pr.stage-index, pr.key, v); }
+                                        if pr.kind == "binding": BindingControl {
+                                            bound: pr.options;
+                                            listening: listening-for == pr.stage-index + "/" + pr.key;
+                                            listen() => { listen-binding(pr.stage-index, pr.key); }
+                                            cancel() => { cancel-listen(); }
+                                            remove(name) => { remove-binding(pr.stage-index, pr.key, name); }
                                         }
                                     }
 
@@ -1072,6 +1175,14 @@ export component App inherits Window {
                                 vertical-alignment: center;
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            // Switching is a daemon action, not a file edit, so it sits apart
+                            // from the editing controls and says which profile is live.
+                            if profiles.length > 0 && connected: Button {
+                                label: profiles[selected-profile].slug == profile
+                                    ? "Active" : "Switch to this";
+                                primary: profiles[selected-profile].slug != profile;
+                                clicked => { switch-profile(profiles[selected-profile].slug); }
+                            }
                             if undo-label != "": Button {
                                 label: "Undo " + undo-label;
                                 clicked => { undo(); }

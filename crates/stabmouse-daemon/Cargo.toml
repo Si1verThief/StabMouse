@@ -24,6 +24,7 @@ stabmouse-config = { path = "../stabmouse-config" }
 stabmouse-core = { path = "../stabmouse-core" }
 stabmouse-desktop = { path = "../stabmouse-desktop" }
 stabmouse-input = { path = "../stabmouse-input" }
+toml.workspace = true
 stabmouse-ipc = { path = "../stabmouse-ipc" }
 serde.workspace = true
 zbus.workspace = true

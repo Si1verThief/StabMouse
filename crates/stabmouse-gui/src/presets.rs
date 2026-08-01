@@ -22,6 +22,9 @@ pub struct Param {
     /// The value as it reads in the file, whatever its type. The catalog decides which
     /// control to offer; this is what the file actually says.
     pub text: String,
+    /// The value itself, for the cases where its shape matters — a binding may be one name
+    /// or several, and flattening that to text would lose the difference.
+    pub raw: toml::Value,
 }
 
 /// One stage of a preset, as the editor shows it.
@@ -96,6 +99,7 @@ fn load_one(path: &Path) -> Option<PresetFile> {
                             toml::Value::String(s) => s.clone(),
                             other => other.to_string(),
                         },
+                        raw: value.clone(),
                     }
                 })
                 .collect(),
@@ -223,6 +227,79 @@ pub fn move_stage(path: &Path, index: usize, delta: i32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every name bound to a parameter, whether it holds one or a list.
+pub fn binding_names(value: &toml::Value) -> Vec<String> {
+    match value {
+        toml::Value::String(one) if !one.is_empty() => vec![one.clone()],
+        toml::Value::Array(many) => many
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Add a name to a binding, keeping what was already there.
+///
+/// Written as a list once there is more than one, and left as a plain string while there is
+/// only one — the common case then reads in the file exactly as it always did.
+pub fn add_binding(path: &Path, stage_index: usize, key: &str, name: &str) -> anyhow::Result<()> {
+    let doc: Document<Preset> = Document::load(path)?;
+    let current = doc
+        .data()
+        .stages
+        .get(stage_index)
+        .and_then(|s| s.params.get(key))
+        .map(binding_names)
+        .unwrap_or_default();
+    let mut names = current;
+    if names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+        return Ok(());
+    }
+    names.push(name.to_string());
+    write_binding(path, stage_index, key, &names)
+}
+
+/// Remove one name from a binding.
+pub fn remove_binding(
+    path: &Path,
+    stage_index: usize,
+    key: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    let doc: Document<Preset> = Document::load(path)?;
+    let names: Vec<String> = doc
+        .data()
+        .stages
+        .get(stage_index)
+        .and_then(|s| s.params.get(key))
+        .map(binding_names)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| !n.eq_ignore_ascii_case(name))
+        .collect();
+    write_binding(path, stage_index, key, &names)
+}
+
+fn write_binding(path: &Path, stage_index: usize, key: &str, names: &[String]) -> anyhow::Result<()> {
+    let mut doc: Document<Preset> = Document::load(path)?;
+    match names {
+        // Nothing bound: remove the key rather than leaving an empty string, which would read
+        // as a binding that exists and does nothing.
+        [] => doc.clear_stage_param(stage_index, key)?,
+        [one] => doc.set_stage_param(stage_index, key, toml::Value::String(one.clone()))?,
+        many => doc.set_stage_param(
+            stage_index,
+            key,
+            toml::Value::Array(many.iter().cloned().map(toml::Value::String).collect()),
+        )?,
+    }
+    doc.save_if_dirty()?;
+    Ok(())
+}
+
 /// Set a parameter that is not a number — a choice, a switch, a binding.
 pub fn write_param_text(
     path: &Path,
@@ -320,6 +397,44 @@ catch_up = 0.35
             .find(|p| p.key == "radius_mm")
             .unwrap();
         assert!((radius.value - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_binding_grows_from_one_name_into_a_list_and_back() {
+        // One binding stays a plain string, so the common case reads in the file exactly as it
+        // always did; a second turns it into a list rather than inventing a separator.
+        let p = write_temp("bindings", "schema = 1\n[[stage]]\ntype = \"snap\"\n");
+        add_binding(&p, 0, "modifier", "BTN_SIDE").unwrap();
+        assert!(std::fs::read_to_string(&p).unwrap().contains("modifier = \"BTN_SIDE\""));
+
+        add_binding(&p, 0, "modifier", "KEY_LEFTSHIFT").unwrap();
+        let loaded = load_one(&p).unwrap();
+        let raw = &loaded.stages[0].params.iter().find(|q| q.key == "modifier").unwrap().raw;
+        assert_eq!(binding_names(raw), ["BTN_SIDE", "KEY_LEFTSHIFT"]);
+
+        remove_binding(&p, 0, "modifier", "BTN_SIDE").unwrap();
+        let loaded = load_one(&p).unwrap();
+        let raw = &loaded.stages[0].params.iter().find(|q| q.key == "modifier").unwrap().raw;
+        assert_eq!(binding_names(raw), ["KEY_LEFTSHIFT"]);
+    }
+
+    #[test]
+    fn removing_the_last_binding_removes_the_key() {
+        // An empty string would read as a binding that exists and does nothing, which is the
+        // one state a user cannot diagnose from the file.
+        let p = write_temp("unbind", "schema = 1\n[[stage]]\ntype = \"snap\"\nmodifier = \"BTN_SIDE\"\n");
+        remove_binding(&p, 0, "modifier", "BTN_SIDE").unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("modifier"), "{text}");
+    }
+
+    #[test]
+    fn binding_the_same_button_twice_changes_nothing() {
+        let p = write_temp("dupe", "schema = 1\n[[stage]]\ntype = \"snap\"\nmodifier = \"BTN_SIDE\"\n");
+        add_binding(&p, 0, "modifier", "btn_side").unwrap();
+        let loaded = load_one(&p).unwrap();
+        let raw = &loaded.stages[0].params.iter().find(|q| q.key == "modifier").unwrap().raw;
+        assert_eq!(binding_names(raw).len(), 1, "case-insensitively the same button");
     }
 
     #[test]
