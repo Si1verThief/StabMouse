@@ -1,0 +1,44 @@
+# StabMouse input daemon, as a user service.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/stabmoused.service ~/.config/systemd/user/
+#   # edit ExecStart below to wherever the binary lives
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now stabmoused
+#
+# A *user* service, not a system one: the daemon needs the session's D-Bus and Wayland
+# sockets to place tablets, track windows and speak to clients, and it must run as the user
+# who owns the input devices.
+#
+# `Restart=on-failure` is the second half of the watchdog. When the input loop wedges, the
+# watchdog aborts the process so the kernel releases the grab and the cursor comes back — and
+# this is what brings the daemon back afterwards, rather than leaving the user unfiltered
+# until they notice. See crates/stabmouse-daemon/src/watchdog.rs.
+
+[Unit]
+Description=StabMouse input daemon
+Documentation=https://github.com/Si1verThief/StabMouse
+# The compositor owns the screen layout, the tablet mapping and the window feed, so starting
+# before it means starting into a session that cannot answer any of those questions.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/stabmoused run
+Restart=on-failure
+# Slow enough that a daemon failing at startup — a bad config, a missing device — does not
+# spin, fast enough that a watchdog abort is invisible to the user.
+RestartSec=1s
+# A crash loop should stop and stay stopped rather than restarting forever: if StabMouse
+# cannot run, the user's raw mouse still works, and silence beats a machine fighting itself.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# The daemon exits cleanly on SIGTERM, releasing the grab on the way out. Even if it did not,
+# the kernel releases the grab when the process dies — verified by probe P8.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

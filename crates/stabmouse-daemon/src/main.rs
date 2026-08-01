@@ -17,6 +17,7 @@ mod tablet;
 mod tablets;
 mod wait;
 mod watch;
+mod watchdog;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
@@ -92,6 +93,12 @@ enum Command {
         /// without a pointer — the safe way to try an unfamiliar config.
         #[arg(long)]
         no_grab: bool,
+        /// Abort if one unit of work takes longer than this, releasing the grab. 0 disables.
+        ///
+        /// The daemon holds an exclusive grab on the pointing device, so a wedged loop means
+        /// no cursor. Dying is how the grab comes back — see watchdog.rs.
+        #[arg(long, default_value_t = crate::watchdog::DEFAULT_TIMEOUT.as_millis() as u64)]
+        watchdog_ms: u64,
     },
 }
 
@@ -126,7 +133,16 @@ fn main() -> anyhow::Result<()> {
             profile,
             mode,
             no_grab,
-        } => run(dir, device, profile, mode, no_grab, cli.verbose),
+            watchdog_ms,
+        } => run(
+            dir,
+            device,
+            profile,
+            mode,
+            no_grab,
+            cli.verbose,
+            std::time::Duration::from_millis(watchdog_ms),
+        ),
     }
 }
 
@@ -301,6 +317,7 @@ fn run(
     mode: Option<usize>,
     no_grab: bool,
     verbose: bool,
+    watchdog: std::time::Duration,
 ) -> anyhow::Result<()> {
     let (store, report) = Store::load(&dir).context("loading config")?;
     if !report.is_clean() {
@@ -492,6 +509,9 @@ fn run(
         println!("  per-application transport: unavailable (no focus source)");
     }
 
+    // Started before the loop, so the very first iteration is already covered.
+    let beat = watchdog::start(watchdog);
+
     println!("  Editing a preset reloads it within ~0.4s. Ctrl-C to stop.");
 
     let mut rt = Runtime {
@@ -507,6 +527,7 @@ fn run(
         verbose,
         emitted_motion: false,
         last_emit: std::time::Instant::now(),
+        beat,
         last_tablet_xy: (-1, -1),
         published,
         focus,

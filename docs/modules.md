@@ -160,7 +160,7 @@ Virtual device creation and event emission.
 - Virtual devices **persist across mode switches and across `Enabled: off`**, so
   applications never see a device vanish mid-session.
 - **No orphan devices after a crash** — verified by `kill -9` followed by
-  re-enumeration.
+  re-enumeration (probe P8).
 - Absolute coordinate space **survives monitor hotplug and geometry change**.
 - Device names and IDs are stable across daemon restarts.
 
@@ -190,18 +190,27 @@ The grab is held by a file descriptor, and **the kernel releases it when the fd
 closes** — which happens on process death. So process death is already safe; the
 only dangerous state is *alive but wedged*.
 
-Design:
+Design, **built and verified**:
 
 1. **A watchdog thread** with its own timer, independent of the hot thread. If the
    hot thread misses its heartbeat, the watchdog calls `abort()`.
 2. `abort()` closes the fds → **the kernel releases the grab** → the cursor comes
-   back.
-3. `systemd Restart=on-failure` brings the daemon back.
+   back. Measured at 13ms (probe P8).
+3. `systemd Restart=on-failure` brings the daemon back — `packaging/stabmoused.service`.
 
 This needs no second process to install or supervise. The residual risk is a
 *whole-process* freeze — SIGSTOP, severe OOM, kernel-level stall — where no
 in-process thread runs. An external releaser is the only cover for that, and is
 deferred until we see it happen.
+
+Two things the implementation adds to the sketch above:
+
+- **The heartbeat times work, not ticks.** The loop legitimately blocks forever when
+  idle, so "must check in every N ms" would fire on a healthy daemon. It marks entering
+  and leaving a unit of work instead, and only unfinished work trips the watchdog.
+- **The mark is an RAII guard**, because pairing enter with leave is a safety invariant
+  rather than a convention: any `continue` or `?` that skipped the end mark would strand
+  the heartbeat busy and abort a healthy daemon.
 
 The stronger guarantee is not to wedge at all: no locks on the hot path, bounded
 work per event, no unbounded loops in any filter, and non-blocking writes.
