@@ -1,0 +1,30 @@
+[package]
+name = "stabmouse-daemon"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The StabMouse input daemon."
+
+[[bin]]
+name = "stabmoused"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+evdev.workspace = true
+# `poll(2)` on the device fd: the hot loop must wake on input *or* on a tick deadline,
+# and std has no timed wait. Already in the tree via evdev.
+libc = "0.2"
+# Config edits arrive as an event rather than being polled for, so a save is felt at once
+# and an idle daemon never wakes at all.
+inotify = "0.11"
+stabmouse-config = { path = "../stabmouse-config" }
+stabmouse-core = { path = "../stabmouse-core" }
+stabmouse-desktop = { path = "../stabmouse-desktop" }
+stabmouse-input = { path = "../stabmouse-input" }
+stabmouse-ipc = { path = "../stabmouse-ipc" }
+serde.workspace = true
+zbus.workspace = true
+stabmouse-output = { path = "../stabmouse-output" }
