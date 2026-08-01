@@ -197,6 +197,15 @@ impl Scroll {
         self.was_active = false;
     }
 
+    /// Time constant for the glide's decay, in seconds.
+    fn tau(&self) -> f64 {
+        if self.momentum_decay_s.is_finite() && self.momentum_decay_s > 0.0 {
+            self.momentum_decay_s
+        } else {
+            0.35
+        }
+    }
+
     /// Carry a released flick onward, decaying.
     ///
     /// Stops at a rate below which the page would be crawling: a glide that never quite ends
@@ -213,11 +222,7 @@ impl Scroll {
         s.scroll_x += self.glide_x * dt;
         s.scroll_y += self.glide_y * dt;
 
-        let tau = if self.momentum_decay_s.is_finite() && self.momentum_decay_s > 0.0 {
-            self.momentum_decay_s
-        } else {
-            0.35
-        };
+        let tau = self.tau();
         let decay = (-dt / tau).exp();
         self.glide_x *= decay;
         self.glide_y *= decay;
@@ -272,11 +277,24 @@ impl Stage for Scroll {
                 s.wheel_h = 0.0;
                 s.scroll_y += v;
                 s.scroll_x += h;
-                // A notch is an impulse rather than a rate, so the glide is seeded from the
-                // notch itself: one flick of the wheel, one length of coast.
-                if self.momentum && dt > 0.0 {
-                    self.glide_y += v / dt.max(0.008);
-                    self.glide_x += h / dt.max(0.008);
+                // A notch is an impulse, not a rate, so it is seeded by the distance it should
+                // coast rather than by a speed.
+                //
+                // **Dividing by `dt` was catastrophically wrong.** An exponential decaying
+                // from rate `R` travels `R × tau` in total, so `v / dt` coasted `v × tau / dt`
+                // — with a 375ms decay and an 8ms sample, forty-seven notches of glide for one
+                // notch of wheel. Worse, it scaled with the sample rate, so the same flick
+                // coasted further when the hand happened to be moving. That is why the
+                // multiplier felt violent at every setting above its minimum: the multiplier
+                // was fine and the momentum behind it was two orders of magnitude out.
+                //
+                // Seeding `v / tau` makes the total coast one notch per notch, and leaves the
+                // decay time deciding how *long* it takes rather than how *far* it goes —
+                // which is the only reading of "decay" that lets the two be tuned separately.
+                if self.momentum {
+                    let tau = self.tau();
+                    self.glide_y += v / tau;
+                    self.glide_x += h / tau;
                     self.coasting = true;
                 }
             }
@@ -717,6 +735,67 @@ mod tests {
         let mut held = wheel_sample(true);
         stage.process(&mut held);
         assert_eq!((held.wheel_v, held.wheel_h), (0.0, 0.0), "held must take it");
+    }
+
+    /// Total scroll from one notch of wheel, including everything it coasts afterwards.
+    fn wheel_flick_total(decay_s: f64, sample_dt: f64) -> f64 {
+        let mut stage = Scroll::new(Mode::Wheel);
+        stage.always_active = true;
+        stage.momentum = true;
+        stage.momentum_decay_s = decay_s;
+
+        let mut total = 0.0;
+        let mut s = Sample::new(0.0, 0.0, 1000, false);
+        s.dt = sample_dt;
+        s.wheel_v = 1.0;
+        stage.process(&mut s);
+        total += s.scroll_y;
+
+        for i in 0..4000 {
+            let mut s = Sample::new(0.0, 0.0, (i + 2) * 1000, false);
+            s.dt = sample_dt;
+            stage.process(&mut s);
+            total += s.scroll_y;
+        }
+        total
+    }
+
+    #[test]
+    fn one_notch_of_wheel_coasts_about_one_notch() {
+        // It coasted about *forty-seven*. The glide was seeded `v / dt`, and an exponential
+        // decaying from rate R travels R×tau, so the total came to v×tau/dt — a number with
+        // the sample interval in the denominator, which has no business deciding how far a
+        // page moves. It made the multiplier feel violent at every setting above its minimum.
+        let total = wheel_flick_total(0.35, 0.008);
+        assert!(
+            (1.5..3.0).contains(&total),
+            "one notch plus about one notch of coast, got {total}"
+        );
+    }
+
+    #[test]
+    fn the_decay_time_changes_how_long_a_coast_lasts_not_how_far_it_goes() {
+        // The whole reason to seed by distance. Otherwise every adjustment to the decay
+        // silently retunes the strength as well, and neither can be set without the other.
+        let quick = wheel_flick_total(0.15, 0.008);
+        let slow = wheel_flick_total(1.2, 0.008);
+        assert!(
+            (quick - slow).abs() < 0.35,
+            "decay must not change the distance: {quick} vs {slow}"
+        );
+    }
+
+    #[test]
+    fn a_flick_coasts_the_same_distance_whatever_the_sample_rate() {
+        // The hand happening to be moving must not make the wheel scroll further. The daemon
+        // ticks faster while the mouse is in motion, and the old seeding turned that into a
+        // multiplier on the momentum.
+        let fast = wheel_flick_total(0.35, 0.001);
+        let slow = wheel_flick_total(0.35, 0.016);
+        assert!(
+            (fast - slow).abs() < 0.35,
+            "sample rate must not change the distance: {fast} vs {slow}"
+        );
     }
 
     #[test]

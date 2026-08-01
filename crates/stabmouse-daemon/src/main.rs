@@ -927,7 +927,14 @@ fn scroll_summary(preset: &stabmouse_config::Preset, slug: &str) -> Option<Strin
 
 fn stage_passthrough(preset: &stabmouse_config::Preset) -> stabmouse_config::Passthrough {
     use stabmouse_config::Passthrough;
-    let mut result = Passthrough::default();
+
+    // **Nothing-said-yet is `None`, not the default.** Seeding with `Passthrough::default()`
+    // seeded the fold with the *middle* value, and since the fold only ever moves toward the
+    // more permissive answer, `reserved` could never survive it — the arm producing it was
+    // unreachable, and setting it in a file did nothing at all, for buttons or for the wheel.
+    // The default belongs at the end, where it means "no stage asked", not at the start where
+    // it silently competes with what every stage did ask for.
+    let mut result: Option<Passthrough> = None;
     for entry in &preset.stages {
         let Some(value) = entry.params.get("mouse_passthrough").and_then(|v| v.as_str()) else {
             continue;
@@ -937,15 +944,61 @@ fn stage_passthrough(preset: &stabmouse_config::Preset) -> stabmouse_config::Pas
             "reserved" => Passthrough::Reserved,
             _ => Passthrough::UnlessActive,
         };
-        result = match (result, asked) {
-            (Passthrough::Always, _) | (_, Passthrough::Always) => Passthrough::Always,
-            (Passthrough::UnlessActive, _) | (_, Passthrough::UnlessActive) => {
-                Passthrough::UnlessActive
-            }
-            _ => Passthrough::Reserved,
-        };
+        result = Some(match result {
+            None => asked,
+            Some(so_far) => match (so_far, asked) {
+                (Passthrough::Always, _) | (_, Passthrough::Always) => Passthrough::Always,
+                (Passthrough::UnlessActive, _) | (_, Passthrough::UnlessActive) => {
+                    Passthrough::UnlessActive
+                }
+                _ => Passthrough::Reserved,
+            },
+        });
     }
-    result
+    result.unwrap_or_default()
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+    use super::*;
+    use stabmouse_config::Passthrough;
+
+    fn preset(body: &str) -> stabmouse_config::Preset {
+        toml::from_str(body).expect("test preset must parse")
+    }
+
+    #[test]
+    fn reserved_survives_being_the_only_thing_asked_for() {
+        // It did not: the fold started at the default and could only become *more* permissive,
+        // so a preset saying `reserved` resolved to `unless_active` and the setting was inert.
+        // The daemon reported one thing and the file said another, which is what made it look
+        // like the wheel handling was at fault.
+        let p = preset("[[stage]]\ntype = \"scroll\"\nmouse_passthrough = \"reserved\"\n");
+        assert_eq!(stage_passthrough(&p), Passthrough::Reserved);
+    }
+
+    #[test]
+    fn the_most_permissive_answer_still_wins_between_stages() {
+        // The rule this fold exists for: a user who asked for a button back anywhere gets it,
+        // rather than having another stage quietly overrule them.
+        let p = preset(
+            "[[stage]]\ntype = \"scroll\"\nmouse_passthrough = \"reserved\"\n\
+             [[stage]]\ntype = \"snap\"\nmouse_passthrough = \"always\"\n",
+        );
+        assert_eq!(stage_passthrough(&p), Passthrough::Always);
+
+        let p = preset(
+            "[[stage]]\ntype = \"scroll\"\nmouse_passthrough = \"reserved\"\n\
+             [[stage]]\ntype = \"snap\"\nmouse_passthrough = \"unless_active\"\n",
+        );
+        assert_eq!(stage_passthrough(&p), Passthrough::UnlessActive);
+    }
+
+    #[test]
+    fn a_preset_that_says_nothing_gets_the_default() {
+        let p = preset("[[stage]]\ntype = \"scroll\"\n");
+        assert_eq!(stage_passthrough(&p), Passthrough::default());
+    }
 }
 
 struct Source {
