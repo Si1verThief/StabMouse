@@ -7,6 +7,7 @@
 //! motion to those that do not.
 
 mod abspointer;
+mod grabrelease;
 mod latency;
 mod mapping;
 mod focus;
@@ -46,6 +47,11 @@ enum Command {
     Passthrough(passthrough::Args),
     /// Create an absolute pointer and measure whether it drives the cursor, and how.
     Abspointer(abspointer::Args),
+    /// Check that process death releases a grab — the assumption the watchdog rests on.
+    Grabrelease(grabrelease::Args),
+    /// Internal: grab a device and hold it until killed. Used by `grabrelease`.
+    #[command(hide = true)]
+    Grabhold(grabrelease::HoldArgs),
 }
 
 fn main() -> Result<()> {
@@ -59,6 +65,8 @@ fn main() -> Result<()> {
         Command::Latency(args) => latency::run(args),
         Command::Passthrough(args) => passthrough::run(args),
         Command::Abspointer(args) => abspointer::run(args),
+        Command::Grabrelease(args) => grabrelease::run(args),
+        Command::Grabhold(args) => grabrelease::hold(args),
     }
 }
 
