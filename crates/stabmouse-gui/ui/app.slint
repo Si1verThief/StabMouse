@@ -170,6 +170,163 @@ component NoticeCard inherits Card {
     }
 }
 
+// One row of the preset editor. A single flat list rather than a list of stages each holding
+// a list of parameters: Slint models do not nest comfortably, and `first-of-stage` carries the
+// grouping without the structure.
+struct ParamRow {
+    stage-index: int,
+    stage-kind: string,
+    stage-enabled: bool,
+    first-of-stage: bool,
+    key: string,
+    label: string,
+    unit: string,
+    help: string,
+    value: float,
+    minimum: float,
+    maximum: float,
+    numeric: bool,
+    text: string,
+    // Formatted in Rust at the parameter's own precision: a resolution reads `1600`, a radius
+    // reads `0.4`, and neither is padded with digits it does not have.
+    display: string,
+}
+
+struct PresetRow {
+    slug: string,
+    name: string,
+}
+
+// A slider track, hand-rolled to match the rest rather than importing a widget set whose
+// metrics and colours would not follow Theme.
+component Track inherits Rectangle {
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <float> value;
+    in property <bool> active: true;
+    callback moved(float);
+
+    height: 22px;
+    property <float> span: max(root.maximum - root.minimum, 0.000001);
+    property <float> frac: clamp((root.value - root.minimum) / root.span, 0.0, 1.0);
+
+    Rectangle {
+        y: root.height / 2 - 2px;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.line;
+    }
+    Rectangle {
+        x: 0px;
+        y: root.height / 2 - 2px;
+        width: root.width * root.frac;
+        height: 4px;
+        border-radius: 2px;
+        background: root.active ? Theme.accent.with-alpha(0.7) : Theme.muted.with-alpha(0.4);
+    }
+    Rectangle {
+        x: root.width * root.frac - 7px;
+        y: root.height / 2 - 7px;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: root.active ? Theme.accent : Theme.muted;
+    }
+
+    ta := TouchArea {
+        enabled: root.active;
+        moved => {
+            root.moved(root.minimum + root.span * clamp(self.mouse-x / root.width, 0.0, 1.0));
+        }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down) {
+                root.moved(root.minimum + root.span * clamp(self.mouse-x / root.width, 0.0, 1.0));
+            }
+        }
+    }
+}
+
+// The default control everywhere: slider and numeric field, side by side, always both
+// (gui.md). The slider spans the *recommended* range and the field accepts anything — typing
+// past the end pins the handle while the field keeps showing the truth.
+component ParamControl inherits Rectangle {
+    in property <ParamRow> param;
+    in property <bool> show-keys;
+    callback changed(float);
+
+    height: 54px;
+
+    VerticalLayout {
+        spacing: 2px;
+
+        HorizontalLayout {
+            spacing: Theme.gap;
+            Text {
+                text: root.param.label;
+                font-size: Theme.size-base;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            // Every control admits what it writes (gui.md).
+            if root.show-keys: Text {
+                text: root.param.key;
+                font-family: "monospace";
+                font-size: Theme.size-muted;
+                color: Theme.muted;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.gap;
+
+            Track {
+                horizontal-stretch: 1;
+                minimum: root.param.minimum;
+                maximum: root.param.maximum;
+                value: root.param.value;
+                moved(v) => { root.changed(v); }
+            }
+
+            Rectangle {
+                width: 92px;
+                border-radius: Theme.radius-control;
+                border-width: 1px;
+                border-color: input.has-focus ? Theme.accent : Theme.line;
+                background: Theme.ground;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 2px;
+                    input := TextInput {
+                        // The field shows the stored value, never the slider's clamped view
+                        // of it — that is what "fields decide" means.
+                        text: root.param.display;
+                        font-size: Theme.size-base;
+                        font-family: "monospace";
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        single-line: true;
+                        accepted => {
+                            root.changed(self.text.to-float());
+                            self.clear-focus();
+                        }
+                    }
+                    Text {
+                        text: root.param.unit;
+                        font-size: Theme.size-muted;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct ModeRow {
     slot: int,
     name: string,
@@ -198,9 +355,20 @@ export component App inherits Window {
     in property <[ModeRow]> modes;
     in property <[string]> stages;
 
+    // Preset editor.
+    in property <[PresetRow]> presets;
+    in property <[ParamRow]> params;
+    in-out property <int> selected-preset;
+    in property <string> selected-preset-path;
+    property <string> page: "dashboard";
+    property <bool> show-keys: false;
+
     callback switch-to(int);
     callback set-enabled(bool);
     callback refresh();
+    callback select-preset(int);
+    callback set-param(int, string, float);
+    callback set-stage-enabled(int, bool);
 
     HorizontalLayout {
         // -------------------------------------------------------------- sidebar
@@ -222,11 +390,19 @@ export component App inherits Window {
                     horizontal-alignment: left;
                 }
 
-                NavItem { label: "Dashboard"; selected: true; }
+                NavItem {
+                    label: "Dashboard";
+                    selected: page == "dashboard";
+                    clicked => { page = "dashboard"; }
+                }
                 // Honest about what exists. A navigation item that opens nothing is worse
                 // than one that says it is not built yet.
                 NavItem { label: "Profiles"; enabled-item: false; }
-                NavItem { label: "Presets"; enabled-item: false; }
+                NavItem {
+                    label: "Presets";
+                    selected: page == "presets";
+                    clicked => { page = "presets"; }
+                }
                 NavItem { label: "Devices"; enabled-item: false; }
 
                 Rectangle { vertical-stretch: 1; }
@@ -254,7 +430,7 @@ export component App inherits Window {
         Rectangle { width: 1px; background: Theme.line; }
 
         // ------------------------------------------------------------ dashboard
-        Rectangle {
+        if page == "dashboard": Rectangle {
             background: Theme.ground;
 
             VerticalLayout {
@@ -438,6 +614,167 @@ export component App inherits Window {
                 }
 
                 Rectangle { vertical-stretch: 1; }
+            }
+        }
+
+        // ------------------------------------------------------------- presets
+        //
+        // Edits land in the preset file and the daemon's own watch picks them up within about
+        // 0.4s, so the loop is: drag, draw, judge. Every filter finding in this project came
+        // from drawing rather than from reasoning, which is why the editor exists at all.
+        if page == "presets": Rectangle {
+            background: Theme.ground;
+
+            HorizontalLayout {
+                Rectangle {
+                    width: 220px;
+                    background: Theme.surface;
+                    VerticalLayout {
+                        padding: Theme.gap;
+                        spacing: 2px;
+                        Text {
+                            text: "Presets";
+                            font-size: Theme.size-heading;
+                            font-weight: 600;
+                            color: Theme.text;
+                            height: 40px;
+                            vertical-alignment: center;
+                        }
+                        for entry[i] in presets: NavItem {
+                            label: entry.name;
+                            selected: i == selected-preset;
+                            clicked => {
+                                selected-preset = i;
+                                select-preset(i);
+                            }
+                        }
+                        if presets.length == 0: Text {
+                            text: "No presets found. `stabmoused init` writes a starter set.";
+                            font-size: Theme.size-muted;
+                            color: Theme.muted;
+                            wrap: word-wrap;
+                        }
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+
+                Rectangle { width: 1px; background: Theme.line; }
+
+                Rectangle {
+                    background: Theme.ground;
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: Theme.gap;
+
+                        HorizontalLayout {
+                            height: 32px;
+                            spacing: Theme.gap;
+                            Text {
+                                text: presets.length > 0 ? presets[selected-preset].name : "";
+                                font-size: Theme.size-heading;
+                                font-weight: 600;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                label: show-keys ? "Hide keys" : "Show keys";
+                                clicked => { show-keys = !show-keys; }
+                            }
+                        }
+
+                        Text {
+                            text: selected-preset-path;
+                            font-family: "monospace";
+                            font-size: Theme.size-muted;
+                            color: Theme.muted;
+                        }
+
+                        // An editor with no save button owes the user this sentence.
+                        Text {
+                            text: "Changes save as you make them, and reach a running daemon in about half a second.";
+                            font-size: Theme.size-muted;
+                            color: Theme.muted;
+                            wrap: word-wrap;
+                        }
+
+                        Flickable {
+                            vertical-stretch: 1;
+                            viewport-height: content.preferred-height;
+
+                            content := VerticalLayout {
+                                spacing: 4px;
+
+                                for pr[i] in params: VerticalLayout {
+                                    spacing: 4px;
+
+                                    // Stage heading on the first parameter of each stage —
+                                    // the flat model's substitute for nesting.
+                                    if pr.first-of-stage: HorizontalLayout {
+                                        height: 40px;
+                                        spacing: Theme.gap;
+                                        Text {
+                                            text: pr.stage-kind;
+                                            font-family: "monospace";
+                                            font-size: Theme.size-base;
+                                            font-weight: 600;
+                                            color: pr.stage-enabled ? Theme.accent : Theme.muted;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Button {
+                                            label: pr.stage-enabled ? "Enabled" : "Disabled";
+                                            primary: pr.stage-enabled;
+                                            clicked => {
+                                                set-stage-enabled(pr.stage-index, !pr.stage-enabled);
+                                            }
+                                        }
+                                    }
+
+                                    if pr.numeric: ParamControl {
+                                        param: pr;
+                                        show-keys: show-keys;
+                                        changed(v) => { set-param(pr.stage-index, pr.key, v); }
+                                    }
+
+                                    // Shown, not hidden: an editor that omits what it cannot
+                                    // render lies about the preset's contents.
+                                    if !pr.numeric: HorizontalLayout {
+                                        height: 28px;
+                                        spacing: Theme.gap;
+                                        Text {
+                                            text: pr.label;
+                                            font-size: Theme.size-base;
+                                            color: Theme.muted;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text {
+                                            text: pr.text;
+                                            font-family: "monospace";
+                                            font-size: Theme.size-muted;
+                                            color: Theme.muted;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    if show-keys && pr.help != "": Text {
+                                        text: pr.help;
+                                        font-size: Theme.size-muted;
+                                        color: Theme.muted;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                if params.length == 0: Text {
+                                    text: "This preset has no stages yet.";
+                                    font-size: Theme.size-muted;
+                                    color: Theme.muted;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

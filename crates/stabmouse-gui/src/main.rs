@@ -11,6 +11,8 @@
 //! the user may never see — this is the frontend for people who are not in a terminal.
 
 mod desktop;
+mod params;
+mod presets;
 
 slint::include_modules!();
 
@@ -176,6 +178,81 @@ fn watch_daemon(weak: slint::Weak<App>) {
     });
 }
 
+/// Load every preset and push the selected one's parameters into the window.
+///
+/// Re-read from disk on every selection rather than cached: the file is the source of truth,
+/// the daemon reloads from it too, and a cache here would be a second opinion about what the
+/// user's config says.
+fn apply_presets(app: &App, selected: usize) {
+    let files = presets::load_all();
+    let rows: Vec<PresetRow> = files
+        .iter()
+        .map(|f| PresetRow {
+            slug: f.slug.clone().into(),
+            name: f.display_name.clone().into(),
+        })
+        .collect();
+
+    let selected = selected.min(files.len().saturating_sub(1));
+    let mut params: Vec<ParamRow> = Vec::new();
+    if let Some(file) = files.get(selected) {
+        for (index, stage) in file.stages.iter().enumerate() {
+            for (n, param) in stage.params.iter().enumerate() {
+                let meta = params::meta(&stage.kind, &param.key);
+                let (lo, hi) = params::range_for(&stage.kind, &param.key, param.value);
+                params.push(ParamRow {
+                    stage_index: index as i32,
+                    stage_kind: stage.kind.clone().into(),
+                    stage_enabled: stage.enabled,
+                    first_of_stage: n == 0,
+                    key: param.key.clone().into(),
+                    label: params::label_for(&stage.kind, &param.key).into(),
+                    unit: meta.unit.into(),
+                    help: meta.help.into(),
+                    value: param.value as f32,
+                    minimum: lo as f32,
+                    maximum: hi as f32,
+                    numeric: param.numeric,
+                    text: param.text.clone().into(),
+                    display: format!(
+                        "{:.*}",
+                        meta.decimals.clamp(0, 6) as usize,
+                        param.value
+                    )
+                    .into(),
+                });
+            }
+            // A stage with no parameters still needs its heading, or it vanishes from an
+            // editor that is supposed to show the pipeline as it is.
+            if stage.params.is_empty() {
+                params.push(ParamRow {
+                    stage_index: index as i32,
+                    stage_kind: stage.kind.clone().into(),
+                    stage_enabled: stage.enabled,
+                    first_of_stage: true,
+                    numeric: false,
+                    label: "no parameters".into(),
+                    ..Default::default()
+                });
+            }
+        }
+        app.set_selected_preset_path(file.path.display().to_string().into());
+    } else {
+        app.set_selected_preset_path(Default::default());
+    }
+
+    app.set_presets(ModelRc::from(Rc::new(VecModel::from(rows))));
+    app.set_params(ModelRc::from(Rc::new(VecModel::from(params))));
+    app.set_selected_preset(selected as i32);
+}
+
+/// The path of the preset currently selected, for a write.
+fn selected_path(app: &App) -> Option<std::path::PathBuf> {
+    let files = presets::load_all();
+    let index = app.get_selected_preset().max(0) as usize;
+    files.get(index).map(|f| f.path.clone())
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let app = App::new()?;
 
@@ -206,6 +283,47 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(app) = weak.upgrade() {
             act(&app, |c| c.set_enabled(enabled));
         }
+    });
+
+    apply_presets(&app, 0);
+
+    let weak = app.as_weak();
+    app.on_select_preset(move |index| {
+        if let Some(app) = weak.upgrade() {
+            apply_presets(&app, index.max(0) as usize);
+        }
+    });
+
+    let weak = app.as_weak();
+    app.on_set_param(move |stage_index, key, value| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_path(&app) else { return };
+        if let Err(e) = presets::write_param(
+            &path,
+            stage_index.max(0) as usize,
+            key.as_str(),
+            f64::from(value),
+        ) {
+            // Not fatal and not silent. A write that failed — a read-only file, a full disk —
+            // must not look like one that worked, because the daemon will go on using the old
+            // value and the interface would be the only thing claiming otherwise.
+            eprintln!("could not write {key}: {e}");
+        }
+        // Re-read rather than trusting the write: what the file now says is what the daemon
+        // will load, and any rounding the format-preserving editor applied belongs on screen.
+        let selected = app.get_selected_preset().max(0) as usize;
+        apply_presets(&app, selected);
+    });
+
+    let weak = app.as_weak();
+    app.on_set_stage_enabled(move |stage_index, enabled| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_path(&app) else { return };
+        if let Err(e) = presets::write_stage_enabled(&path, stage_index.max(0) as usize, enabled) {
+            eprintln!("could not toggle stage: {e}");
+        }
+        let selected = app.get_selected_preset().max(0) as usize;
+        apply_presets(&app, selected);
     });
 
     app.run()

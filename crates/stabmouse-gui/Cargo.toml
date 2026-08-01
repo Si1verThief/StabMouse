@@ -10,8 +10,11 @@ name = "stabmouse-gui"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
 slint = "1.17"
+stabmouse-config = { path = "../stabmouse-config" }
 stabmouse-ipc = { path = "../stabmouse-ipc" }
+toml.workspace = true
 zbus.workspace = true
 
 [build-dependencies]

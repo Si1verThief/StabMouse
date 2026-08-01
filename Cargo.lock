@@ -4824,9 +4824,12 @@ dependencies = [
 name = "stabmouse-gui"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "slint",
  "slint-build",
+ "stabmouse-config",
  "stabmouse-ipc",
+ "toml 0.8.23",
  "zbus",
 ]
 
