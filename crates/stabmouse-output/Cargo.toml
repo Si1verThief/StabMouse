@@ -1,0 +1,12 @@
+[package]
+name = "stabmouse-output"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "uinput sinks: relative mouse and virtual tablet."
+
+[dependencies]
+evdev.workspace = true
+stabmouse-core = { path = "../stabmouse-core" }
+thiserror.workspace = true
