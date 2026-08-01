@@ -392,26 +392,25 @@ pub const STAGES: &[StageSpec] = &[
                 "mode",
                 "Mode",
                 "off",
-                &["off", "drag", "joystick"],
-                "Drag scrolls by distance. Joystick sets a speed from how far you hold away \
-                 from where you pressed, and keeps scrolling while you hold still.",
+                &["off", "drag", "grab", "joystick"],
+                "Drag pushes the page and freezes the cursor, like a finger on glass. Grab \
+                 holds a point on the page so it follows the pointer, like a PDF hand tool. \
+                 Joystick sets a speed from how far you hold away from where you pressed. \
+                 Off does nothing, which is what a stage you have not configured should do.",
             ),
             bind("button", "Button", "What engages the gesture. BTN_MIDDLE is the familiar one."),
-            when(
-                f(
-                    "drag_mm_per_unit",
-                    "Distance per notch",
-                    "mm",
-                    4.0,
-                    1.0,
-                    20.0,
-                    1,
-                    "Hand travel per scroll notch. Larger scrolls slower.",
-                ),
-                "mode",
-                "drag",
+            f(
+                "drag_mm_per_unit",
+                "Distance per notch",
+                "mm",
+                4.0,
+                1.0,
+                20.0,
+                1,
+                "Hand travel per scroll notch, for drag and grab. Larger scrolls slower — and \
+                 for grab this is what decides whether the page keeps pace with the pointer.",
             ),
-            when(b("drag_invert", "Invert", false, ""), "mode", "drag"),
+            b("drag_invert", "Invert", false, ""),
             when(
                 f(
                     "joystick_deadzone_mm",
@@ -449,6 +448,24 @@ pub const STAGES: &[StageSpec] = &[
                 ),
                 "mode",
                 "joystick",
+            ),
+            b(
+                "momentum",
+                "Momentum",
+                false,
+                "Keep scrolling after a flick, decaying — a long page then feels like a \
+                 surface with weight rather than a crank. Ignored by joystick, which has no \
+                 release to carry from.",
+            ),
+            f(
+                "momentum_decay_ms",
+                "Momentum decay",
+                "ms",
+                350.0,
+                100.0,
+                1500.0,
+                0,
+                "How long a flick takes to fade to about a third of its release speed.",
             ),
         ],
     },

@@ -288,7 +288,7 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 
 | Param | Type | Notes |
 |---|---|---|
-| `mode` | enum | `off` (default) · `drag` · `joystick` |
+| `mode` | enum | `off` (default) · `drag` · `grab` · `joystick` |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
 | `drag.mm_per_unit` | f64 | Hand travel per scroll unit |
@@ -298,9 +298,26 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | `hi_res` | bool | Emit `REL_WHEEL_HI_RES` — always on, see below |
 
 - **`drag`** — touchscreen-style swipe. While held, hand motion scrolls directly and
-  the cursor is frozen.
+  the cursor is frozen, as a finger on glass has no cursor to move.
+- **`grab`** — a hand tool. The cursor keeps moving and the page moves with it, so the
+  point under the cursor stays under it. `drag_mm_per_unit` is what decides whether the
+  page keeps pace, and it is a tuned figure rather than an exact one: the millimetre-to-
+  pixel mapping lives in the compositor and is not queryable from here (see the units
+  section).
 - **`joystick`** — middle-click autoscroll. Displacement from the press origin sets a
-  continuous scroll *velocity*; the cursor stays put.
+  continuous scroll *velocity*.
+
+**Correction: `joystick` does not freeze the cursor**, though this document said it did.
+Freezing it made the gesture unusable in practice — displacement is the control, so with
+no cursor to see there is no way to judge the speed or to find the way back to a stop, and
+it reads as the scroll having locked up. Every autoscroll worth copying leaves the cursor
+free for exactly this reason. Reported from use, 2026-08-01.
+
+**Momentum** (`momentum`, `momentum_decay_ms`) carries a released flick onward, decaying
+exponentially, so a long page feels like a surface with weight rather than a crank. Off by
+default. Any new press cancels a glide, because a hand back on the mouse wants control
+rather than to fight the page's leftover speed. Joystick has no release to carry from and
+ignores it.
 
 **Why this is in scope.** Middle-click autoscroll is standard on Windows and in
 browsers, and inconsistent or missing across Linux desktops — a common complaint from

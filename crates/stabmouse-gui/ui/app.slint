@@ -194,6 +194,8 @@ struct EditorRow {
     minimum: float,
     maximum: float,
     display: string,
+    /// 10^decimals, so the field can round in Slint without a format string.
+    round-factor: float,
     flag: bool,
     choice: string,
     options: [string],
@@ -459,6 +461,13 @@ component ParamControl inherits Rectangle {
 
     height: 54px;
 
+    // **The control owns the value while it is being dragged.**
+    //
+    // It used to read straight from the model, and every drag tick wrote the file, which
+    // rebuilt the model, which reset the handle underneath the hand — the slider fought back.
+    // Holding the value here means the drag is smooth and the model is free to arrive late.
+    property <float> live: root.param.value;
+
     VerticalLayout {
         spacing: 2px;
         HorizontalLayout {
@@ -484,8 +493,11 @@ component ParamControl inherits Rectangle {
                 horizontal-stretch: 1;
                 minimum: root.param.minimum;
                 maximum: root.param.maximum;
-                value: root.param.value;
-                moved(v) => { root.changed(v); }
+                value: root.live;
+                moved(v) => {
+                    root.live = v;
+                    root.changed(v);
+                }
             }
             Rectangle {
                 width: 92px;
@@ -498,16 +510,22 @@ component ParamControl inherits Rectangle {
                     padding-right: 8px;
                     spacing: 2px;
                     input := TextInput {
-                        // Shows the stored value, never the slider's clamped view of it —
-                        // that is what "fields decide" means.
-                        text: root.param.display;
+                        // Follows the live value at the parameter's own precision, so a
+                        // resolution still reads `1600` while being dragged rather than
+                        // `1600.000`.
+                        text: round(root.live * root.param.round-factor)
+                              / root.param.round-factor;
                         font-size: Theme.size-base;
                         font-family: "monospace";
                         color: Theme.text;
                         vertical-alignment: center;
                         horizontal-alignment: right;
                         single-line: true;
-                        accepted => { root.changed(self.text.to-float()); self.clear-focus(); }
+                        accepted => {
+                            root.live = self.text.to-float();
+                            root.changed(root.live);
+                            self.clear-focus();
+                        }
                     }
                     Text {
                         text: root.param.unit;

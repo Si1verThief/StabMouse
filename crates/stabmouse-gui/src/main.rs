@@ -252,6 +252,7 @@ fn apply_presets(app: &App, selected: usize) {
                             row.maximum = if hi > lo { hi as f32 } else { (lo + 1.0) as f32 };
                             row.display =
                                 format!("{:.*}", decimals.min(6) as usize, value).into();
+                            row.round_factor = 10f32.powi(i32::from(decimals.min(6)));
                         }
                         ParamKind::Bool { default } => {
                             row.kind = "bool".into();
@@ -599,12 +600,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
         remember(&hist, &path, "change value");
-        let selected = app.get_selected_preset().max(0) as usize;
-        after!(
-            app,
-            presets::write_param(&path, index.max(0) as usize, key.as_str(), f64::from(value)),
-            apply_presets(&app, selected)
-        );
+        // **Written, but the model is not rebuilt.** A drag emits a change per frame, and
+        // re-reading on each one replaced the model under the hand — the control now owns the
+        // value while it is being dragged, so there is nothing here worth interrupting it for.
+        // The file is still the truth, and the next selection or action reads it back.
+        match presets::write_param(&path, index.max(0) as usize, key.as_str(), f64::from(value)) {
+            Ok(()) => app.set_notice(Default::default()),
+            Err(e) => notice(&app, e),
+        }
         show_undo(&app, &hist);
     });
 

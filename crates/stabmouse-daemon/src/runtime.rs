@@ -107,6 +107,8 @@ pub struct Runtime {
     /// `None` unless some mode asks for one — a mouse-button binding needs no keyboard opened
     /// at all, and an unopened device is the strongest privacy guarantee available.
     pub listener: Option<stabmouse_input::Listener>,
+    /// The codes the listener was last opened for, so a reload only reopens on a real change.
+    pub watched_keys: Vec<u16>,
     /// Whether the current mode's modifier is a mouse button that is currently held.
     ///
     /// Tracked here rather than read from the report, because a button's state persists
@@ -574,6 +576,12 @@ impl Runtime {
                         fresh.profile_slug,
                         self.modes.current_index() + 1
                     );
+                    // **Rebuild the keyboard watch.** The listener only ever opens keyboards
+                    // for codes some mode actually binds, so a key bound *after* startup was
+                    // being watched by nothing at all — the binding was in the file, the
+                    // daemon had resolved it, and no device was reporting it.
+                    self.rewatch_keyboards(&mut fds, keyboards_from);
+
                     notify::mode("config reloaded", &name);
                     self.publish(Change::Config);
                 }
@@ -1030,6 +1038,55 @@ impl Runtime {
         match self.modes.current() {
             Some(mode) => self.any_held(&mode.scroll_button),
             None => false,
+        }
+    }
+
+    /// Reopen the keyboards, so a binding added since startup is actually watched.
+    ///
+    /// Keyboards occupy the tail of the poll set, which is what lets them be replaced without
+    /// disturbing the indices of everything before them. Rebuilt only when the wanted set
+    /// changes: reopening on every config edit would drop and reacquire devices for a change
+    /// that had nothing to do with bindings.
+    fn rewatch_keyboards(&mut self, fds: &mut Vec<std::os::fd::RawFd>, from: usize) {
+        let mut wanted: Vec<u16> = self
+            .modes
+            .slots()
+            .iter()
+            .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()))
+            .flatten()
+            .filter(|c| !stabmouse_input::is_mouse_button(**c))
+            .copied()
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        if wanted == self.watched_keys {
+            return;
+        }
+        self.watched_keys = wanted.clone();
+
+        self.listener = if wanted.is_empty() {
+            None
+        } else {
+            match stabmouse_input::Listener::watching(&wanted) {
+                Ok(l) => {
+                    println!(
+                        "  constrain modifier: watching {} keyboard(s) for {} key(s)",
+                        l.raw_fds().len(),
+                        wanted.len()
+                    );
+                    Some(l)
+                }
+                Err(e) => {
+                    eprintln!("  keyboard bindings unavailable: {e}");
+                    None
+                }
+            }
+        };
+
+        fds.truncate(from);
+        if let Some(l) = &self.listener {
+            fds.extend(l.raw_fds());
         }
     }
 

@@ -606,6 +606,7 @@ fn run(
         last_emit: std::time::Instant::now(),
         beat,
         listener,
+        watched_keys: keyboard_codes.clone(),
         buttons_held: Vec::new(),
         last_tablet_xy: (-1, -1),
         published,

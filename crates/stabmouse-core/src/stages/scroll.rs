@@ -6,31 +6,48 @@ use crate::stage::Stage;
 /// How held movement becomes scrolling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Inert. The identity, and the default.
+    /// Inert. The identity, and what a stage added blank does until told otherwise.
     Off,
-    /// Touchscreen-style swipe: hand movement scrolls directly, one-to-one with distance.
+    /// Touchscreen-style swipe: hand movement scrolls directly and the cursor is frozen, as
+    /// a finger on glass has no cursor to move.
     Drag,
+    /// A hand tool: the cursor keeps moving and the page moves with it, so the point under
+    /// the cursor stays under the cursor. What dragging a PDF feels like.
+    ///
+    /// Distinct from `Drag` in exactly one way that matters — the cursor is *not* frozen —
+    /// and that is the whole difference between pushing a surface and holding a point on it.
+    Grab,
     /// Middle-click autoscroll: displacement from where the button went down sets a scroll
-    /// *velocity*, so a small sustained offset scrolls forever without more hand travel.
+    /// *velocity*, so a small sustained offset scrolls without more hand travel.
     Joystick,
 }
 
-/// Diverts motion into scroll while active, and **consumes it**.
+/// Diverts hand movement into scrolling while a button is held.
 ///
-/// # Why the cursor stops
+/// # Which gestures freeze the cursor, and why it is not all of them
 ///
-/// Both gestures freeze the pointer: a swipe that also dragged the cursor would select text
-/// or draw a line while scrolling, and an autoscroll whose origin kept moving has no fixed
-/// point to measure displacement from. Consuming the motion is therefore the feature, not a
-/// side effect — downstream position stages see nothing and drawing is suspended, exactly as
-/// stages.md specifies.
+/// `drag` freezes it: a finger on glass has no cursor, and a swipe that also dragged one
+/// would select text while scrolling. `grab` and `joystick` do **not**.
 ///
-/// # Joystick needs the pipeline to keep breathing
+/// Freezing the cursor during `joystick` was the original reading of the spec and it made the
+/// gesture unusable in practice: displacement from the press origin is the control, so with
+/// no cursor to see, there is no way to judge how fast you are scrolling or how far back to
+/// come to stop. It reads as the scroll locking up. Every autoscroll worth copying — browsers,
+/// file managers — leaves the cursor free for exactly this reason, and stages.md has been
+/// corrected to match.
 ///
-/// A velocity that persists while the hand is still has no input to be driven by, so this
-/// reports itself **unsettled** whenever it is scrolling from displacement. That is what
-/// keeps the daemon feeding zero-motion ticks, and it is the same mechanism the pressure
-/// envelope and the stabiliser's lag already rely on.
+/// # Momentum
+///
+/// A flick carries on and decays, which is what makes a long page feel like a surface rather
+/// than a crank. The rate is measured as the gesture ends and decays exponentially; any new
+/// press cancels it, because a hand returning to the mouse means the user wants control back.
+///
+/// # Keeping the pipeline breathing
+///
+/// A velocity that persists while the hand is still — a joystick offset, or a glide — has no
+/// input to drive it, so this reports itself **unsettled** while either is running. That is
+/// what keeps the daemon feeding zero-motion ticks, the same mechanism the pressure envelope
+/// and the stabiliser's lag already rely on.
 #[derive(Debug, Clone)]
 pub struct Scroll {
     enabled: bool,
@@ -44,6 +61,10 @@ pub struct Scroll {
     pub gain: f64,
     /// `joystick`: click to start and click to stop, rather than holding throughout.
     pub latch: bool,
+    /// Keep scrolling after a swipe is released, decaying from the speed it ended at.
+    pub momentum: bool,
+    /// Seconds for a flick to decay to about a third of its release speed.
+    pub momentum_decay_s: f64,
 
     /// Displacement from the press origin, millimetres.
     offset_x: f64,
@@ -55,6 +76,14 @@ pub struct Scroll {
     latched: bool,
     /// True while a velocity is being produced with no motion to drive it.
     coasting: bool,
+    /// Recent scroll rate in notches per second, for a flick to carry on from.
+    rate_x: f64,
+    rate_y: f64,
+    /// Notches per second still owed to momentum after a release.
+    glide_x: f64,
+    glide_y: f64,
+    /// Whether the gesture was engaged on the previous sample, so a release is noticed once.
+    was_active: bool,
 }
 
 impl Default for Scroll {
@@ -76,6 +105,10 @@ impl Scroll {
             deadzone_mm: 2.0,
             gain: 1.5,
             latch: false,
+            momentum: false,
+            // A flick that dies in a third of a second reads as a surface with weight rather
+            // than as one that keeps going after the hand has moved on.
+            momentum_decay_s: 0.35,
             offset_x: 0.0,
             offset_y: 0.0,
             carry_x: 0.0,
@@ -83,6 +116,11 @@ impl Scroll {
             was_held: false,
             latched: false,
             coasting: false,
+            rate_x: 0.0,
+            rate_y: 0.0,
+            glide_x: 0.0,
+            glide_y: 0.0,
+            was_active: false,
         }
     }
 
@@ -109,6 +147,38 @@ impl Scroll {
         self.carry_x = 0.0;
         self.carry_y = 0.0;
         self.coasting = false;
+        self.rate_x = 0.0;
+        self.rate_y = 0.0;
+        self.glide_x = 0.0;
+        self.glide_y = 0.0;
+        self.was_active = false;
+    }
+
+    /// Carry a released flick onward, decaying.
+    ///
+    /// Stops at a rate below which the page would be crawling: a glide that never quite ends
+    /// leaves the pipeline unsettled forever, which would hold the daemon's tick loop open for
+    /// motion nobody can see.
+    fn glide(&mut self, s: &mut Sample, dt: f64) {
+        const STOP_NOTCHES_PER_S: f64 = 0.25;
+        if self.glide_x.hypot(self.glide_y) < STOP_NOTCHES_PER_S || dt <= 0.0 {
+            self.glide_x = 0.0;
+            self.glide_y = 0.0;
+            self.coasting = false;
+            return;
+        }
+        s.scroll_x += self.glide_x * dt;
+        s.scroll_y += self.glide_y * dt;
+
+        let tau = if self.momentum_decay_s.is_finite() && self.momentum_decay_s > 0.0 {
+            self.momentum_decay_s
+        } else {
+            0.35
+        };
+        let decay = (-dt / tau).exp();
+        self.glide_x *= decay;
+        self.glide_y *= decay;
+        self.coasting = true;
     }
 }
 
@@ -132,28 +202,51 @@ impl Stage for Scroll {
             self.release();
         }
 
+        let dt = if s.dt.is_finite() && s.dt > 0.0 { s.dt } else { 0.0 };
+        let sign = if self.invert { -1.0 } else { 1.0 };
         let active = self.engaged(s.scrolling);
+
         if !active {
-            if self.coasting || self.offset_x != 0.0 || self.offset_y != 0.0 {
-                self.release();
+            if self.was_active {
+                self.was_active = false;
+                // A flick hands its speed to the glide; a slow finish hands over nothing,
+                // which is what stops a careful drag from drifting after the hand stops.
+                if self.momentum && self.mode != Mode::Joystick {
+                    self.glide_x = self.rate_x;
+                    self.glide_y = self.rate_y;
+                } else {
+                    self.glide_x = 0.0;
+                    self.glide_y = 0.0;
+                }
+                self.offset_x = 0.0;
+                self.offset_y = 0.0;
+                self.rate_x = 0.0;
+                self.rate_y = 0.0;
             }
+            self.glide(s, dt);
             return;
         }
 
-        let sign = if self.invert { -1.0 } else { 1.0 };
+        // The hand is back, so whatever the page was still doing is no longer wanted.
+        self.glide_x = 0.0;
+        self.glide_y = 0.0;
+        self.was_active = true;
+
+        let mut produced_x = 0.0;
+        let mut produced_y = 0.0;
 
         match self.mode {
             Mode::Off => {}
-            Mode::Drag => {
+            Mode::Drag | Mode::Grab => {
                 let per_unit = if self.mm_per_unit.is_finite() && self.mm_per_unit > 0.0 {
                     self.mm_per_unit
                 } else {
                     4.0
                 };
-                // Scrolling *content*: dragging down moves the page up, which is why the
-                // vertical term is negated before `invert` is applied to it.
-                self.carry_x += s.dx / per_unit * sign;
-                self.carry_y += -s.dy / per_unit * sign;
+                // Scrolling *content*: pulling down brings the page up, which is why the
+                // vertical term is negated before `invert` is applied.
+                produced_x = s.dx / per_unit * sign;
+                produced_y = -s.dy / per_unit * sign;
                 self.coasting = false;
             }
             Mode::Joystick => {
@@ -168,14 +261,13 @@ impl Stage for Scroll {
                 let gain = if self.gain.is_finite() { self.gain.max(0.0) } else { 0.0 };
                 let distance = self.offset_x.hypot(self.offset_y);
 
-                if distance > deadzone && distance > 0.0 && s.dt.is_finite() && s.dt > 0.0 {
-                    // Speed grows with displacement *past* the deadzone, so the gesture
-                    // starts from a standstill rather than jumping to a rate the moment the
-                    // edge is crossed.
+                if distance > deadzone && distance > 0.0 && dt > 0.0 {
+                    // Speed grows with displacement *past* the deadzone, so the gesture starts
+                    // from a standstill rather than jumping to a rate at the edge.
                     let beyond = distance - deadzone;
-                    let rate = beyond * gain * s.dt;
-                    self.carry_x += self.offset_x / distance * rate * sign;
-                    self.carry_y += -self.offset_y / distance * rate * sign;
+                    let rate = beyond * gain;
+                    produced_x = self.offset_x / distance * rate * dt * sign;
+                    produced_y = -self.offset_y / distance * rate * dt * sign;
                     self.coasting = true;
                 } else {
                     self.coasting = false;
@@ -183,14 +275,28 @@ impl Stage for Scroll {
             }
         }
 
+        self.carry_x += produced_x;
+        self.carry_y += produced_y;
+
+        // Rate for a flick to carry on from, smoothed so the last twitch before release does
+        // not decide the whole glide.
+        if dt > 0.0 {
+            let alpha = (dt / 0.05).clamp(0.0, 1.0);
+            self.rate_x += ((produced_x / dt) - self.rate_x) * alpha;
+            self.rate_y += ((produced_y / dt) - self.rate_y) * alpha;
+        }
+
         s.scroll_x += self.carry_x;
         s.scroll_y += self.carry_y;
         self.carry_x = 0.0;
         self.carry_y = 0.0;
 
-        // The whole point: the hand was steering a page, not a cursor.
-        s.dx = 0.0;
-        s.dy = 0.0;
+        // **Only `drag` takes the cursor.** `grab` moves the page *with* the pointer, so the
+        // point under it stays under it; `joystick` needs the cursor visible to steer by.
+        if self.mode == Mode::Drag {
+            s.dx = 0.0;
+            s.dy = 0.0;
+        }
     }
 
     fn reset(&mut self) {
@@ -208,10 +314,11 @@ impl Stage for Scroll {
     }
 
     fn settled(&self) -> bool {
-        // Unsettled only while a velocity is running with nothing driving it. A drag is
-        // settled between samples — it produces nothing without hand movement — so claiming
-        // otherwise would keep the daemon ticking for a gesture that has nothing to add.
-        !self.coasting
+        // Unsettled only while a velocity is running with nothing driving it — a joystick
+        // offset, or a glide after a flick. A drag is settled between samples, since it
+        // produces nothing without hand movement, and claiming otherwise would keep the
+        // daemon ticking for a gesture with nothing to add.
+        !self.coasting && self.glide_x == 0.0 && self.glide_y == 0.0
     }
 }
 
@@ -359,8 +466,67 @@ mod tests {
     }
 
     #[test]
+    fn grab_scrolls_without_taking_the_cursor() {
+        // The difference from drag, and the whole point of the mode: the page moves *with*
+        // the pointer, so what is under it stays under it.
+        let mut stage = Scroll::new(Mode::Grab);
+        let (_, sy, mx, my) = feed(&mut stage, &[(1.0, 2.0, true); 8]);
+        assert!(sy != 0.0, "it must still scroll");
+        assert!((mx - 8.0).abs() < 1e-9 && (my - 16.0).abs() < 1e-9, "cursor kept moving");
+    }
+
+    #[test]
+    fn joystick_leaves_the_cursor_free_to_steer_with() {
+        // Freezing it made the gesture unusable: displacement is the control, so with no
+        // cursor there is no way to judge speed or find the way back to a stop.
+        let mut stage = Scroll::new(Mode::Joystick);
+        let (_, _, mx, my) = feed(&mut stage, &[(0.5, 0.5, true); 10]);
+        assert!((mx - 5.0).abs() < 1e-9 && (my - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_flick_carries_on_and_stops_by_itself() {
+        let mut stage = Scroll::new(Mode::Drag);
+        stage.momentum = true;
+        let mut steps: Vec<(f64, f64, bool)> = vec![(0.0, 3.0, true); 12];
+        steps.push((0.0, 0.0, false));
+        let during = feed(&mut stage, &steps).1;
+
+        // Released: it must keep going...
+        let after = feed(&mut stage, &[(0.0, 0.0, false); 20]).1;
+        assert!(after.abs() > 0.0, "a flick must carry on: {after}");
+        assert!(after.abs() < during.abs(), "and carry less than the swipe itself");
+
+        // ...and then stop, rather than holding the tick loop open forever.
+        feed(&mut stage, &[(0.0, 0.0, false); 3000]);
+        assert!(stage.settled(), "a glide must end");
+    }
+
+    #[test]
+    fn momentum_is_off_unless_asked_for() {
+        let mut stage = Scroll::new(Mode::Drag);
+        let mut steps: Vec<(f64, f64, bool)> = vec![(0.0, 3.0, true); 12];
+        steps.push((0.0, 0.0, false));
+        feed(&mut stage, &steps);
+        let after = feed(&mut stage, &[(0.0, 0.0, false); 20]).1;
+        assert_eq!(after, 0.0, "a released drag must stop dead unless momentum is on");
+    }
+
+    #[test]
+    fn taking_hold_again_cancels_a_glide() {
+        // A hand back on the mouse wants control, not to fight the page's leftover speed.
+        let mut stage = Scroll::new(Mode::Drag);
+        stage.momentum = true;
+        let mut steps: Vec<(f64, f64, bool)> = vec![(0.0, 3.0, true); 12];
+        steps.push((0.0, 0.0, false));
+        feed(&mut stage, &steps);
+        feed(&mut stage, &[(0.0, 0.0, true); 2]);
+        assert!(stage.glide_x == 0.0 && stage.glide_y == 0.0);
+    }
+
+    #[test]
     fn nothing_panics_on_pathological_input() {
-        for mode in [Mode::Drag, Mode::Joystick] {
+        for mode in [Mode::Drag, Mode::Grab, Mode::Joystick] {
             let mut stage = Scroll::new(mode);
             stage.mm_per_unit = f64::NAN;
             stage.gain = f64::INFINITY;

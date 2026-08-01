@@ -196,6 +196,7 @@ fn build_scroll(p: &mut Params) -> Scroll {
     let mode = match p.str("mode", "off").as_str() {
         "off" => ScrollMode::Off,
         "drag" => ScrollMode::Drag,
+        "grab" => ScrollMode::Grab,
         "joystick" => ScrollMode::Joystick,
         other => {
             p.warn(format!("unknown scroll mode '{other}'; using off"));
@@ -208,6 +209,8 @@ fn build_scroll(p: &mut Params) -> Scroll {
     scroll.deadzone_mm = p.f64("joystick_deadzone_mm", scroll.deadzone_mm);
     scroll.gain = p.f64("joystick_gain", scroll.gain);
     scroll.latch = p.bool("latch", scroll.latch);
+    scroll.momentum = p.bool("momentum", scroll.momentum);
+    scroll.momentum_decay_s = p.f64("momentum_decay_ms", scroll.momentum_decay_s * 1000.0) / 1000.0;
     // Resolved by the daemon, for the same reason `snap.modifier` is: turning a name into an
     // evdev code is platform work, and this crate builds for wasm and PyO3.
     let _ = p.str("button", "");
