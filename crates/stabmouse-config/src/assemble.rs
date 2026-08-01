@@ -193,14 +193,13 @@ fn build_snap(p: &mut Params) -> Snap {
 fn build_scroll(p: &mut Params) -> Scroll {
     // Off is the identity, so a stage named without parameters does nothing rather than
     // silently swallowing motion the moment a button is pressed.
-    let mode = match p.str("mode", "off").as_str() {
-        "off" => ScrollMode::Off,
+    let mode = match p.str("mode", "drag").as_str() {
         "drag" => ScrollMode::Drag,
         "grab" => ScrollMode::Grab,
         "joystick" => ScrollMode::Joystick,
         other => {
-            p.warn(format!("unknown scroll mode '{other}'; using off"));
-            ScrollMode::Off
+            p.warn(format!("unknown scroll mode '{other}'; using drag"));
+            ScrollMode::Drag
         }
     };
     let mut scroll = Scroll::new(mode);

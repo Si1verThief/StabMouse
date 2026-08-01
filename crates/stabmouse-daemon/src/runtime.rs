@@ -1090,6 +1090,29 @@ impl Runtime {
         }
     }
 
+    /// Whether a button is part of any gesture binding on the current mode.
+    ///
+    /// Only mouse buttons: a keyboard key is never emitted by this daemon, so there is
+    /// nothing to swallow, and treating one as consumed would be a claim about a device we
+    /// deliberately do not control.
+    fn bound_to_gesture(&self, code: u16) -> bool {
+        if !stabmouse_input::is_mouse_button(code) {
+            return false;
+        }
+        // Never the pen button: it is what starts a stroke, and a preset that also bound it
+        // to a gesture would otherwise silently lose the ability to draw.
+        if code == self.pen_button {
+            return false;
+        }
+        self.modes.current().is_some_and(|m| {
+            m.scroll_button
+                .iter()
+                .chain(m.modifier.iter())
+                .flatten()
+                .any(|c| *c == code)
+        })
+    }
+
     /// Whether any chord is fully held.
     ///
     /// A mouse button is answered from the grabbed device's own state; a keyboard key from the
@@ -1185,6 +1208,17 @@ impl Runtime {
             );
         }
 
+        // **A button bound to a gesture is consumed by it.** Otherwise binding the middle
+        // button to autoscroll also pastes, and binding a side button also goes Back — the
+        // gesture appears to "activate when it shouldn't", when what actually fired was the
+        // button's ordinary job happening alongside it.
+        let keys: Vec<(u16, bool)> = report
+            .keys
+            .iter()
+            .filter(|(code, _)| !self.bound_to_gesture(*code))
+            .copied()
+            .collect();
+
         // Read before the mutable borrow of the mode below.
         let constrain = self.constrain_held();
         let scrolling = self.scroll_held();
@@ -1247,7 +1281,7 @@ impl Runtime {
                             pointer.relative(*code, *value);
                         }
                         emit_scroll(gesture, |code, value| pointer.relative(code, value));
-                        for (code, pressed) in &report.keys {
+                        for (code, pressed) in &keys {
                             pointer.key(*code, *pressed);
                         }
                         pointer.flush()?;
@@ -1283,7 +1317,7 @@ impl Runtime {
                     self.mouse.relative(*code, *value);
                 }
                 emit_scroll(gesture, |code, value| self.mouse.relative(code, value));
-                for (code, pressed) in &report.keys {
+                for (code, pressed) in &keys {
                     self.mouse.key(*code, *pressed);
                 }
                 self.mouse.flush()?;
@@ -1309,7 +1343,7 @@ impl Runtime {
                     self.mouse.relative(*code, *value);
                 }
                 emit_scroll(gesture, |code, value| self.mouse.relative(code, value));
-                for (code, pressed) in &report.keys {
+                for (code, pressed) in &keys {
                     self.mouse.key(*code, *pressed);
                 }
                 self.mouse.flush()?;
@@ -1375,7 +1409,7 @@ impl Runtime {
                 // do — proximity churn is what applications handle worst (D13).
                 tablet.pen(x, y, sample.pressure.unwrap_or(0.0), *stroke_active);
 
-                for (code, pressed) in &report.keys {
+                for (code, pressed) in &keys {
                     // Right and middle also become barrel buttons, for applications that read
                     // them as such.
                     if *code == evdev::KeyCode::BTN_RIGHT.code() {
@@ -1408,7 +1442,7 @@ impl Runtime {
                 } else {
                     &report.other_relative
                 };
-                let clicks: &[(u16, bool)] = if self.tablet_clicks { &report.keys } else { &[] };
+                let clicks: &[(u16, bool)] = if self.tablet_clicks { &keys } else { &[] };
                 if !wheel.is_empty() || !clicks.is_empty() || gesture.any() {
                     let at = self.tablets.position_px();
                     match (self.pointer.as_mut(), at) {

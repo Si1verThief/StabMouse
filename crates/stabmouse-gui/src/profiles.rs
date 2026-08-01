@@ -88,6 +88,26 @@ pub fn profile_path(name: &str) -> PathBuf {
     profiles_dir().join(format!("{}.toml", slugify(name)))
 }
 
+/// Make a profile the one the daemon starts with.
+///
+/// Switching is a runtime action and does not survive a restart, which is correct — but it
+/// left no way to say "and mean it", so a daemon restarted after a switch quietly went back
+/// to the old profile and every preset edited in the meantime looked like it did nothing.
+pub fn set_default(slug: &str) -> anyhow::Result<()> {
+    let path = config_dir().join("config.toml");
+    let mut doc: Document<stabmouse_config::Root> = Document::load(&path)?;
+    doc.set(&["defaults", "profile"], toml::Value::String(slug.to_string()))?;
+    doc.save_if_dirty()?;
+    Ok(())
+}
+
+/// The profile the daemon will start with.
+pub fn default_slug() -> Option<String> {
+    let path = config_dir().join("config.toml");
+    let doc: Document<stabmouse_config::Root> = Document::load(&path).ok()?;
+    doc.data().defaults.profile.clone()
+}
+
 pub fn delete(path: &Path) -> anyhow::Result<()> {
     std::fs::remove_file(path)?;
     Ok(())

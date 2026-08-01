@@ -193,11 +193,18 @@ fn apply_presets(app: &App, selected: usize) {
     use stabmouse_config::ParamKind;
 
     let files = presets::load_all();
+    // Which presets the *running* profile loads. Editing one it does not is a silent no-op,
+    // and finding that out by tuning an unloaded preset for an evening is a poor way to learn.
+    let live: Vec<String> = Client::connect()
+        .and_then(|c| c.modes())
+        .map(|modes| modes.into_iter().map(|m| m.preset).collect())
+        .unwrap_or_default();
     let rows: Vec<PresetRow> = files
         .iter()
         .map(|f| PresetRow {
             slug: f.slug.clone().into(),
             name: f.display_name.clone().into(),
+            live: live.iter().any(|p| *p == f.slug),
         })
         .collect();
 
@@ -227,10 +234,35 @@ fn apply_presets(app: &App, selected: usize) {
             // Catalog order, so a stage always presents its knobs the same way round — and
             // anything the file carries that the catalog does not know about after it, rather
             // than dropped.
+            // What the stage's own parameters currently say, so a dependent one can be judged
+            // against them rather than shown regardless.
+            let value_of = |key: &str| -> Option<String> {
+                stage
+                    .params
+                    .iter()
+                    .find(|q| q.key == key)
+                    .map(|q| q.text.clone())
+                    .or_else(|| {
+                        stabmouse_config::catalog::param(&stage.kind, key).map(|p| match p.kind {
+                            ParamKind::Choice { default, .. } => default.to_string(),
+                            ParamKind::Bool { default } => default.to_string(),
+                            _ => String::new(),
+                        })
+                    })
+            };
+
             let mut seen: Vec<&str> = Vec::new();
             if let Some(spec) = spec {
                 for p in spec.params {
                     seen.push(p.key);
+                    // **A control that cannot do anything is not shown.** The joystick's
+                    // settings under a drag gesture, the curve's under a flat sensitivity —
+                    // leaving them visible implies they are doing something.
+                    if let Some((on, wanted)) = p.depends_on {
+                        if value_of(on).as_deref() != Some(wanted) {
+                            continue;
+                        }
+                    }
                     let stored = stage.params.iter().find(|q| q.key == p.key);
                     let mut row = EditorRow {
                         stage_index: index as i32,
@@ -351,6 +383,7 @@ fn apply_profiles(app: &App, selected: usize) {
         app.set_selected_profile_path(Default::default());
     }
 
+    app.set_startup_profile_slug(profiles::default_slug().unwrap_or_default().into());
     app.set_profiles(ModelRc::from(Rc::new(VecModel::from(rows))));
     app.set_slots(ModelRc::from(Rc::new(VecModel::from(slots))));
     app.set_selected_profile(selected as i32);
@@ -929,6 +962,20 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(app) = weak.upgrade() {
             act(&app, |c| c.set_profile(slug.as_str()));
         }
+    });
+
+    let weak = app.as_weak();
+    let hist = history.clone();
+    app.on_make_startup_profile(move |slug| {
+        let Some(app) = weak.upgrade() else { return };
+        let path = presets::config_dir().join("config.toml");
+        remember(&hist, &path, "set startup profile");
+        match profiles::set_default(slug.as_str()) {
+            Ok(()) => app.set_notice(Default::default()),
+            Err(e) => notice(&app, e),
+        }
+        apply_profiles(&app, app.get_selected_profile().max(0) as usize);
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();

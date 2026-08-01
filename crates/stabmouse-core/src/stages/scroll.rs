@@ -6,8 +6,6 @@ use crate::stage::Stage;
 /// How held movement becomes scrolling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Inert. The identity, and what a stage added blank does until told otherwise.
-    Off,
     /// Touchscreen-style swipe: hand movement scrolls directly and the cursor is frozen, as
     /// a finger on glass has no cursor to move.
     Drag,
@@ -88,7 +86,10 @@ pub struct Scroll {
 
 impl Default for Scroll {
     fn default() -> Self {
-        Self::new(Mode::Off)
+        // Drag, not an inert mode. **There is no `off`**: every stage already has `enabled`,
+        // which turns it off without losing its tuning, and a second way to mean the same
+        // thing reads as a setting that does something the user has not been told about.
+        Self::new(Mode::Drag)
     }
 }
 
@@ -188,9 +189,6 @@ impl Stage for Scroll {
     }
 
     fn process(&mut self, s: &mut Sample) {
-        if self.mode == Mode::Off {
-            return;
-        }
         if !s.dx.is_finite() || !s.dy.is_finite() {
             s.dx = 0.0;
             s.dy = 0.0;
@@ -236,7 +234,6 @@ impl Stage for Scroll {
         let mut produced_y = 0.0;
 
         match self.mode {
-            Mode::Off => {}
             Mode::Drag | Mode::Grab => {
                 let per_unit = if self.mm_per_unit.is_finite() && self.mm_per_unit > 0.0 {
                     self.mm_per_unit
@@ -342,13 +339,14 @@ mod tests {
     }
 
     #[test]
-    fn off_is_byte_identical_pass_through() {
-        let mut stage = Scroll::new(Mode::Off);
+    fn an_unheld_gesture_is_byte_identical_pass_through() {
+        // The identity is "the button is not held", not a mode that means nothing — `enabled`
+        // is what turns a stage off, and one way to mean that is enough.
+        let mut stage = Scroll::new(Mode::Drag);
         let mut s = Sample::new(1.5, -2.5, 1000, true);
-        s.scrolling = true;
         let before = s;
         stage.process(&mut s);
-        assert_eq!(s, before, "the default must not touch anything");
+        assert_eq!(s, before);
     }
 
     #[test]

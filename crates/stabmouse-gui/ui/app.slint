@@ -204,6 +204,9 @@ struct EditorRow {
 struct PresetRow {
     slug: string,
     name: string,
+    /// Loaded by the running profile. An edit to a preset nothing loads changes nothing, and
+    /// that is worth saying before the user spends an evening on it.
+    live: bool,
 }
 
 struct SlotRow {
@@ -413,6 +416,8 @@ component Track inherits Rectangle {
     in property <float> maximum;
     in property <float> value;
     callback moved(float);
+    /// Fired once when the hand lets go. The write happens here rather than per frame.
+    callback committed(float);
 
     height: 22px;
     property <float> span: max(root.maximum - root.minimum, 0.000001);
@@ -447,6 +452,12 @@ component Track inherits Rectangle {
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.down) {
                 root.moved(root.minimum + root.span * clamp(self.mouse-x / root.width, 0.0, 1.0));
+            }
+            // One write per drag, not one per frame. Writing continuously filled the undo
+            // stack with hundreds of entries for a single adjustment and made the daemon
+            // reload its whole config on every pixel of travel.
+            if (ev.kind == PointerEventKind.up) {
+                root.committed(root.value);
             }
         }
     }
@@ -494,10 +505,10 @@ component ParamControl inherits Rectangle {
                 minimum: root.param.minimum;
                 maximum: root.param.maximum;
                 value: root.live;
-                moved(v) => {
-                    root.live = v;
-                    root.changed(v);
-                }
+                // Moving only updates what is on screen; the value is written when the hand
+                // lets go, so a drag is one change rather than several hundred.
+                moved(v) => { root.live = v; }
+                committed(v) => { root.changed(v); }
             }
             Rectangle {
                 width: 92px;
@@ -576,12 +587,17 @@ export component App inherits Window {
     in property <[string]> stage-kinds;
     in-out property <int> selected-preset;
     in property <string> selected-preset-path;
+    /// Presets the running profile actually loads, so editing one that is not live is not a
+    /// silent no-op.
+    in property <[string]> live-presets;
 
     // Profile editor.
     in property <[ProfileRow]> profiles;
     in property <[SlotRow]> slots;
     in-out property <int> selected-profile;
     in property <string> selected-profile-path;
+    /// The profile the daemon will start with, which is not necessarily the running one.
+    in property <string> startup-profile-slug;
     in property <[string]> outputs;
     in property <[string]> preset-slugs;
 
@@ -623,6 +639,7 @@ export component App inherits Window {
     callback cancel-listen();
     callback remove-binding(int, string, string);
     callback switch-profile(string);
+    callback make-startup-profile(string);
 
     // Keys are captured here, buttons by the daemon — each side sees what only it can see.
     // Escape leaves, which is the way out every capture control owes the user.
@@ -922,7 +939,7 @@ export component App inherits Window {
                             vertical-alignment: center;
                         }
                         for entry[i] in presets: NavItem {
-                            label: entry.name;
+                            label: entry.live ? entry.name + "  ●" : entry.name;
                             selected: i == selected-preset;
                             clicked => { selected-preset = i; select-preset(i); }
                         }
@@ -969,11 +986,22 @@ export component App inherits Window {
                             }
                         }
 
-                        Text {
-                            text: selected-preset-path;
-                            font-family: "monospace";
-                            font-size: Theme.size-muted;
-                            color: Theme.muted;
+                        HorizontalLayout {
+                            spacing: Theme.gap;
+                            Text {
+                                text: selected-preset-path;
+                                font-family: "monospace";
+                                font-size: Theme.size-muted;
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            if presets.length > 0 && !presets[selected-preset].live: Text {
+                                text: "not loaded by the running profile";
+                                font-size: Theme.size-muted;
+                                color: Theme.warning;
+                                vertical-alignment: center;
+                            }
                         }
 
                         if notice != "": NoticeCard {
@@ -1237,6 +1265,21 @@ export component App inherits Window {
                                 text: "● running";
                                 font-size: Theme.size-muted;
                                 color: Theme.success;
+                                vertical-alignment: center;
+                            }
+                            // Switching is a runtime action and does not survive a restart.
+                            // Without a way to say "and mean it", a restarted daemon quietly
+                            // went back to the old profile and every edit since looked inert.
+                            if profiles.length > 0
+                                && profiles[selected-profile].slug != startup-profile-slug: Button {
+                                label: "Use on startup";
+                                clicked => { make-startup-profile(profiles[selected-profile].slug); }
+                            }
+                            if profiles.length > 0
+                                && profiles[selected-profile].slug == startup-profile-slug: Text {
+                                text: "starts by default";
+                                font-size: Theme.size-muted;
+                                color: Theme.muted;
                                 vertical-alignment: center;
                             }
                             if undo-label != "": Button {

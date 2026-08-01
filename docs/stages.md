@@ -288,7 +288,7 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 
 | Param | Type | Notes |
 |---|---|---|
-| `mode` | enum | `off` (default) · `drag` · `grab` · `joystick` |
+| `mode` | enum | `drag` (default) · `grab` · `joystick` |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
 | `drag.mm_per_unit` | f64 | Hand travel per scroll unit |
@@ -297,8 +297,18 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | `joystick.gain` | f64 | Scroll rate per mm of displacement |
 | `hi_res` | bool | Emit `REL_WHEEL_HI_RES` — always on, see below |
 
+**There is no `off` mode.** Every stage already has `enabled`, which turns it off without
+losing its tuning; a second way to say the same thing reads as a setting that does
+something the user has not been told about. Removed after exactly that confusion.
+
+**A button bound to a gesture is consumed by it** and does not also do its ordinary job —
+otherwise binding the middle button to autoscroll also pastes, which reads as the gesture
+firing when it should not. The pen button is never consumed, since a preset that bound it
+would silently lose the ability to draw.
+
 - **`drag`** — touchscreen-style swipe. While held, hand motion scrolls directly and
-  the cursor is frozen, as a finger on glass has no cursor to move.
+  the cursor is frozen, as a finger on glass has no cursor to move. **This is the only
+  mode that freezes the cursor**, and it is the whole difference between it and `grab`.
 - **`grab`** — a hand tool. The cursor keeps moving and the page moves with it, so the
   point under the cursor stays under it. `drag_mm_per_unit` is what decides whether the
   page keeps pace, and it is a tuned figure rather than an exact one: the millimetre-to-

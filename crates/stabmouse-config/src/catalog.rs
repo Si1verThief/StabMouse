@@ -391,12 +391,12 @@ pub const STAGES: &[StageSpec] = &[
             c(
                 "mode",
                 "Mode",
-                "off",
-                &["off", "drag", "grab", "joystick"],
+                "drag",
+                &["drag", "grab", "joystick"],
                 "Drag pushes the page and freezes the cursor, like a finger on glass. Grab \
-                 holds a point on the page so it follows the pointer, like a PDF hand tool. \
-                 Joystick sets a speed from how far you hold away from where you pressed. \
-                 Off does nothing, which is what a stage you have not configured should do.",
+                 holds a point on the page so it follows the pointer, like a PDF hand tool — \
+                 the cursor keeps moving, which is the whole difference. Joystick sets a \
+                 speed from how far you hold away from where you pressed.",
             ),
             bind("button", "Button", "What engages the gesture. BTN_MIDDLE is the familiar one."),
             f(
