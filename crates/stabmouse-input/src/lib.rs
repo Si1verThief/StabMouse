@@ -358,6 +358,54 @@ mod tests {
     }
 
     #[test]
+    fn reading_a_device_that_has_gone_away_fails_rather_than_blocking() {
+        // Load-bearing for the daemon's reconnect path: a vanished device must *error*, so
+        // the loop can notice and start waiting. If the read blocked instead, the loop would
+        // hang holding a grab and the watchdog would abort a daemon whose only problem was an
+        // unplugged mouse.
+        use evdev::{uinput::VirtualDevice, AttributeSet};
+
+        let mut keys = AttributeSet::<KeyCode>::new();
+        keys.insert(KeyCode::BTN_LEFT);
+        let mut axes = AttributeSet::<RelativeAxisCode>::new();
+        axes.insert(RelativeAxisCode::REL_X);
+
+        let Ok(mut device) = VirtualDevice::builder().and_then(|b| {
+            b.name("StabMouse test vanishing mouse")
+                .with_keys(&keys)
+                .and_then(|b| b.with_relative_axes(&axes))
+                .and_then(|b| b.build())
+        }) else {
+            return; // No uinput here; the daemon's own startup would have said so.
+        };
+
+        // The node exists before it is openable — udev applies permissions a moment later.
+        let mut node = None;
+        for _ in 0..100 {
+            if let Ok(nodes) = device.enumerate_dev_nodes_blocking() {
+                if let Some(p) = nodes.flatten().next() {
+                    if Device::open(&p).is_ok() {
+                        node = Some(p);
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let Some(node) = node else { return };
+        let Ok(mut capture) = Capture::open(&node) else { return };
+
+        drop(device);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(
+            capture.read().is_err(),
+            "a read on a departed device must report failure, not wait for input that will \
+             never come"
+        );
+    }
+
+    #[test]
     fn a_report_accumulates_until_syn() {
         let mut r = Report::default();
         assert!(!r.accumulate(&ev(EventType::RELATIVE, RelativeAxisCode::REL_X.0, 3)));

@@ -29,13 +29,23 @@ const DEVICE: usize = 0;
 const CONTROL: usize = 1;
 const CONFIG: usize = 2;
 
-/// Report a stall once input has been arriving this long with nothing coming out.
-///
-/// Measured on the shipped presets, the slowest legitimate delay before the cursor first moves
-/// is ~364ms at a very gentle 5mm/s, and 24-119ms at normal speeds. Anything past this is not
-/// the filters being slow, so it is worth saying out loud rather than leaving the user to
-/// wonder whether the program is frozen.
+/// Time floor before silence is even considered worth reporting.
 const STALL_REPORT: Duration = Duration::from_millis(600);
+
+/// Net hand travel, in millimetres, that no legitimate filter can swallow.
+///
+/// **Time alone cannot tell a stall from a filter working**, which is what the first version
+/// got wrong: it fired on every slow stroke with aggressive smoothing. A pulled string rests up
+/// to a full radius behind the cursor permanently and by design — that is the filter, not a
+/// backlog — so at 5mm/s a 9mm radius is nearly two seconds of entirely correct silence, and no
+/// duration distinguishes it from a fault.
+///
+/// Net displacement does. Whatever a filter holds back is bounded by its own parameters, and
+/// the heaviest shipped preset rests 9mm behind; travel this far in one direction with nothing
+/// emitted is beyond anything a filter would explain. Net rather than path length, because
+/// circling inside a stabiliser's radius covers distance while going nowhere, and that is
+/// exactly the case that must not report.
+const STALL_TRAVEL_MM: f64 = 25.0;
 
 /// How long the hand must be still before a compositor cursor report is adopted into the
 /// shared position. Our own emissions echo back through the report a few pixels stale, and
@@ -43,8 +53,20 @@ const STALL_REPORT: Duration = Duration::from_millis(600);
 /// not manage keeps reporting after our emissions stop, so it survives this gate.
 const ADOPT_IDLE: Duration = Duration::from_millis(150);
 
+/// How often to look for a source device that has gone away.
+///
+/// A second is imperceptible against unplugging and replugging a mouse, and enumeration is
+/// not free — it opens every node under `/dev/input` — so this is deliberately not eager.
+const RECONNECT_POLL: Duration = Duration::from_millis(1000);
+
 pub struct Runtime {
-    pub capture: Capture,
+    /// The source device, absent while it is disconnected.
+    ///
+    /// `None` is a normal running state, not a failure: a wireless mouse that goes to sleep
+    /// takes its event node with it, and the daemon waits rather than dying — dying would take
+    /// the virtual tablets with it, and every application holding one loses pressure until it
+    /// restarts (D13).
+    pub capture: Option<Capture>,
     pub control: Listener,
     pub mouse: MouseSink,
     /// The fallback transport: absolute, fed from the mapper, so the cursor cannot diverge
@@ -61,6 +83,10 @@ pub struct Runtime {
     pub verbose: bool,
     /// Set by `handle` whenever a non-zero movement actually reached a sink.
     pub emitted_motion: bool,
+    /// Net source movement, in device counts, since anything last reached a sink. Compared
+    /// against [`STALL_TRAVEL_MM`] to tell a stalled daemon from a filter doing its job.
+    pub stall_dx: f64,
+    pub stall_dy: f64,
     /// When a sink last carried motion, gating cursor-report adoption — see [`ADOPT_IDLE`].
     pub last_emit: Instant,
     /// Proof of life for the watchdog. Marked around each unit of work, never around the
@@ -150,6 +176,7 @@ impl Runtime {
         &mut self,
         signals: &Signals,
         mut reload: impl FnMut() -> Option<Reloaded>,
+        mut reopen: impl FnMut() -> Option<Capture>,
         config_dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Stats> {
         // Device and control socket in one wait, so a command wakes the loop as promptly as a
@@ -169,7 +196,10 @@ impl Runtime {
                 }
             });
 
-        let mut fds = vec![self.capture.raw_fd(), self.control.raw_fd()];
+        // A negative descriptor is skipped by `poll(2)` with `revents` cleared, which is how
+        // the device slot stays at a fixed index while the device itself comes and goes. The
+        // alternative — rebuilding the set — would shift every other index under it.
+        let mut fds = vec![self.capture.as_ref().map_or(-1, |c| c.raw_fd()), self.control.raw_fd()];
         if let Some(w) = &watcher {
             fds.push(w.raw_fd());
         }
@@ -220,7 +250,11 @@ impl Runtime {
             // Indefinite when nothing is outstanding *and* a watch is doing the noticing:
             // there is then no reason to ever wake a daemon nobody is using, which is what
             // makes idle cost genuinely zero rather than 2.5 wakeups a second.
-            let deadline = if outstanding {
+            let deadline = if self.capture.is_none() {
+                // Something has to wake the loop to look for the device, since the thing that
+                // would normally wake it is the thing that is missing.
+                Some(RECONNECT_POLL)
+            } else if outstanding {
                 Some(TICK)
             } else if watcher.is_some() {
                 None
@@ -238,6 +272,15 @@ impl Runtime {
             // above deliberately sits outside it: an idle daemon may stay in `poll`
             // indefinitely and that is the correct resting state, not a wedge. See watchdog.rs.
             let _work = self.beat.work();
+
+            // Look for the device while it is away. Enumeration opens every node under
+            // /dev/input, so it is not free — but it only runs while disconnected, and once
+            // per interval rather than per wakeup.
+            if self.capture.is_none() {
+                if let Some(capture) = reopen() {
+                    self.regain_device(capture, &mut fds);
+                }
+            }
 
             // Modifier state before anything is filtered, so a constraint engages on the same
             // report the user's press arrived in rather than one late.
@@ -277,7 +320,26 @@ impl Runtime {
             // until the user happens to move the mouse, stranding every queued command behind
             // it — which is exactly how one switch landed out of seven.
             if wake.has(DEVICE) {
-                let events: Vec<_> = self.capture.read()?.collect();
+                // A read failure means the device is gone — unplugged, or a wireless mouse
+                // asleep. Losing it is not a reason to exit: the process dying would take the
+                // virtual tablets with it, and every application holding one loses pressure
+                // until it restarts (D13). So the source is dropped and waited for.
+                // Collected, and any failure reduced to a message, before the loop touches
+                // `self` again: the iterator borrows the capture that `lose_device` replaces.
+                let read: std::result::Result<Vec<_>, String> = match self.capture.as_mut() {
+                    Some(capture) => match capture.read() {
+                        Ok(events) => Ok(events.collect()),
+                        Err(e) => Err(e.to_string()),
+                    },
+                    None => Ok(Vec::new()),
+                };
+                let events = match read {
+                    Ok(events) => events,
+                    Err(why) => {
+                        self.lose_device(&why, &mut fds, &mut stroke_active);
+                        continue;
+                    }
+                };
                 for event in &events {
                     if !report.accumulate(event) {
                         continue;
@@ -308,11 +370,18 @@ impl Runtime {
                 if events.iter().any(|e| e.event_type() == evdev::EventType::RELATIVE) {
                     let now = Instant::now();
                     let since = *input_since.get_or_insert(now);
+                    let travelled_mm = {
+                        let per_mm = self.quantizer.counts_per_mm().max(f64::MIN_POSITIVE);
+                        self.stall_dx.hypot(self.stall_dy) / per_mm
+                    };
                     if self.emitted_motion {
                         input_since = None;
                         stall_reported = false;
                         self.emitted_motion = false;
-                    } else if !stall_reported && now.duration_since(since) > STALL_REPORT {
+                    } else if !stall_reported
+                        && now.duration_since(since) > STALL_REPORT
+                        && travelled_mm > STALL_TRAVEL_MM
+                    {
                         stall_reported = true;
                         let mode = self
                             .modes
@@ -320,12 +389,13 @@ impl Runtime {
                             .map(|m| format!("{} ({:?})", m.name, m.output))
                             .unwrap_or_else(|| "none".into());
                         eprintln!(
-                            "STALL: {:.0}ms of input with no motion emitted. mode {} = {mode}, \
+                            "STALL: {travelled_mm:.0}mm of hand movement over {:.0}ms with no \
+                             motion emitted. mode {} = {mode}, \
                              inert={}, grabbed={}, stages=[{}]",
                             now.duration_since(since).as_millis(),
                             self.modes.current_index() + 1,
                             self.inert,
-                            self.capture.is_grabbed(),
+                            self.capture.as_ref().is_some_and(|c| c.is_grabbed()),
                             self.modes
                                 .current()
                                 .map(|m| m.pipeline.stage_names().collect::<Vec<_>>().join(", "))
@@ -442,7 +512,9 @@ impl Runtime {
         }
 
         if want_inert {
-            self.capture.ungrab();
+            if let Some(c) = self.capture.as_mut() {
+                c.ungrab();
+            }
             self.tablets.leave_all();
             self.inert = true;
             eprintln!("PANIC: grab released, filtering stopped. Send panic again to resume.");
@@ -454,18 +526,85 @@ impl Runtime {
         // Resuming can fail — another remapper may have taken the device while we were inert.
         // The published state has to reflect what actually happened, not what was asked for,
         // or a client shows "active" over a mouse nobody is filtering.
-        match self.capture.grab() {
-            Ok(()) => {
+        match self.capture.as_mut() {
+            // Resuming with no device is not a failure to report — the reconnect path grabs
+            // it when it returns, and staying inert would silently ignore the user's request.
+            None => {
                 self.inert = false;
-                eprintln!("resumed");
-                notify::mode("resumed", "filtering again");
+                eprintln!("resumed; waiting for the device to come back");
+                notify::mode("resumed", "waiting for the device");
             }
-            Err(e) => {
-                eprintln!("could not re-grab, staying inert: {e}");
-                notify::mode("could not resume", "the device could not be grabbed");
-            }
+            Some(capture) => match capture.grab() {
+                Ok(()) => {
+                    self.inert = false;
+                    eprintln!("resumed");
+                    notify::mode("resumed", "filtering again");
+                }
+                Err(e) => {
+                    eprintln!("could not re-grab, staying inert: {e}");
+                    notify::mode("could not resume", "the device could not be grabbed");
+                }
+            },
         }
         self.publish(Change::Enabled);
+    }
+
+    /// Drop the source device and start waiting for it to return.
+    ///
+    /// Everything downstream is deliberately left standing: the virtual mouse, the pointer and
+    /// the tablets all survive, because tearing them down is what would cost every running
+    /// application its pressure (D13). Only the pen is lifted, since a tool left in proximity
+    /// over an application while nothing is driving it is the two-cursor hazard from D23.
+    fn lose_device(&mut self, why: &str, fds: &mut [std::os::fd::RawFd], stroke_active: &mut bool) {
+        // Dropping the capture closes the fd, which is also what releases the grab — the same
+        // property the watchdog rests on (P8), here arriving by an ordinary route.
+        self.capture = None;
+        // A negative descriptor is ignored by `poll`, so the slot stays put while the device
+        // is away. Leaving the dead fd in place would wake the loop on POLLERR forever.
+        if let Some(slot) = fds.get_mut(DEVICE) {
+            *slot = -1;
+        }
+        *stroke_active = false;
+        self.tablets.leave_all();
+        self.frozen_until = None;
+
+        eprintln!("source device lost ({why}); waiting for it to come back");
+        notify::mode("device disconnected", "waiting for it to return");
+        let reason = "the source device is disconnected".to_string();
+        self.published.publish(|s| {
+            s.degraded = stabmouse_ipc::Degraded {
+                degraded: true,
+                reason: reason.clone(),
+            };
+        });
+        self.published.announce(crate::service::Announce::Degraded);
+    }
+
+    /// Adopt a device that has come back.
+    fn regain_device(&mut self, capture: Capture, fds: &mut [std::os::fd::RawFd]) {
+        let name = capture.name().to_string();
+        let path = capture.path().display().to_string();
+        if let Some(slot) = fds.get_mut(DEVICE) {
+            *slot = capture.raw_fd();
+        }
+        self.capture = Some(capture);
+
+        // The gap while it was away is longer than any real one, so filter state describes a
+        // world that no longer exists. The pipeline would reach the same conclusion from the
+        // timestamp jump, but saying it here does not depend on the returning device's clock
+        // agreeing with the old one — which, for a device that has just been re-enumerated,
+        // is not something to assume.
+        if let Some(mode) = self.modes.current_mut() {
+            mode.pipeline.reset();
+        }
+        self.quantizer.reset();
+
+        eprintln!("source device back: {name} ({path})");
+        notify::mode("device reconnected", &name);
+        self.published.publish(|s| {
+            s.degraded = stabmouse_ipc::Degraded::default();
+        });
+        self.published.announce(crate::service::Announce::Degraded);
     }
 
     /// A switch the user asked for. Only ever called from command handling, which is what
@@ -714,6 +853,12 @@ impl Runtime {
     ) -> anyhow::Result<()> {
         self.track_button(report, stroke_active);
 
+        // Net source movement since a sink last carried anything, for the stall check. Raw
+        // counts, because the question is what the *hand* did, independent of whatever the
+        // filters decided to do with it.
+        self.stall_dx += f64::from(report.dx);
+        self.stall_dy += f64::from(report.dy);
+
         // The window under the position, looked up once: it decides both the transport and
         // whether this application needs the pen held still to receive a scroll.
         let under = self.under_position();
@@ -797,6 +942,8 @@ impl Runtime {
                         if pointer.position(px, py) {
                             self.emitted_motion = true;
                             self.last_emit = Instant::now();
+                            self.stall_dx = 0.0;
+                            self.stall_dy = 0.0;
                         }
                         // Wheel and buttons bypass the filters: they are not pointer
                         // motion. Through this sink they land under the visible cursor,
@@ -829,6 +976,8 @@ impl Runtime {
                 if dx != 0 || dy != 0 {
                     self.emitted_motion = true;
                     self.last_emit = Instant::now();
+                    self.stall_dx = 0.0;
+                    self.stall_dy = 0.0;
                 }
                 self.mouse.motion(dx, dy);
                 // Wheel and buttons bypass the filters: they are not pointer motion, and
@@ -854,6 +1003,8 @@ impl Runtime {
                 if dx != 0 || dy != 0 {
                     self.emitted_motion = true;
                     self.last_emit = Instant::now();
+                    self.stall_dx = 0.0;
+                    self.stall_dy = 0.0;
                 }
                 self.mouse.motion(dx, dy);
                 for (code, value) in &report.other_relative {
@@ -906,6 +1057,8 @@ impl Runtime {
                 if (x, y) != self.last_tablet_xy {
                     self.emitted_motion = true;
                     self.last_emit = Instant::now();
+                    self.stall_dx = 0.0;
+                    self.stall_dy = 0.0;
                     self.last_tablet_xy = (x, y);
                 }
                 // Recreated here rather than on the switch when a profile opts into teardown,

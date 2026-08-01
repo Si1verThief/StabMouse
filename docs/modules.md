@@ -137,7 +137,12 @@ Device enumeration, identity, grabbing, reading, hotplug.
 - Identity matching degrades serial → VID:PID → default, and device identities
   remain **stable across reconnect**.
 - **Hotplug** re-establishes without user action. **Sleep/resume** recovers,
-  including the timestamp discontinuity.
+  including the timestamp discontinuity. Built: losing the source is a *waiting*
+  state, not an exit — exiting would take the virtual tablets with it, and every
+  application holding one loses pressure until it restarts (D13). The device's slot
+  in the poll set goes negative, which `poll` skips, and the device is re-found by
+  the same route that chose it, so a node returning as a different `eventN` is still
+  recognised.
 - Grab failure is **explained** — naming the permission cause — and leaves the
   system fail-open.
 - Exposes read timing for `bench`.

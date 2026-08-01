@@ -339,7 +339,7 @@ fn run(
         );
     }
 
-    let source = pick_source(&store, device)?;
+    let source = pick_source(&store, device.clone())?;
     let mut capture = Capture::open(&source.path)
         .with_context(|| format!("opening {}", source.path.display()))?;
 
@@ -586,7 +586,7 @@ fn run(
     println!("  Editing a preset reloads it within ~0.4s. Ctrl-C to stop.");
 
     let mut rt = Runtime {
-        capture,
+        capture: Some(capture),
         control,
         mouse,
         pointer,
@@ -597,6 +597,8 @@ fn run(
         pen_button: evdev::KeyCode::BTN_LEFT.code(),
         verbose,
         emitted_motion: false,
+        stall_dx: 0.0,
+        stall_dy: 0.0,
         last_emit: std::time::Instant::now(),
         beat,
         listener,
@@ -619,6 +621,23 @@ fn run(
         ),
         frozen_until: None,
         inert: false,
+    };
+
+    // Re-find the device by the same route that chose it, so a node that comes back as a
+    // different `eventN` is still recognised — which is the normal case after a replug.
+    let reopen_dir = dir.clone();
+    let reopen_explicit = device.clone();
+    let reopen_grab = !no_grab;
+    let reopen = move || -> Option<Capture> {
+        let (store, _) = Store::load(&reopen_dir).ok()?;
+        let found = pick_source(&store, reopen_explicit.clone()).ok()?;
+        let mut capture = Capture::open(&found.path).ok()?;
+        if reopen_grab {
+            // A device that is back but still held by something else is not ready; the next
+            // interval tries again rather than running ungrabbed and doubling every motion.
+            capture.grab().ok()?;
+        }
+        Some(capture)
     };
 
     let reload_dir = dir.clone();
@@ -670,6 +689,7 @@ fn run(
                 }
             }
         },
+        move || reopen(),
         Some(dir),
     )?;
 
