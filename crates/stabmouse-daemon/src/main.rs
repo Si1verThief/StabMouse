@@ -554,7 +554,9 @@ fn run(
     let keyboard_codes: Vec<u16> = modes
         .slots()
         .iter()
-        .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()).copied())
+        .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()))
+        .flatten()
+        .copied()
         .filter(|c| !stabmouse_input::is_mouse_button(*c))
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
@@ -625,7 +627,9 @@ fn run(
         requested_profile: None,
         capture_until: None,
         captured: captured.clone(),
-        swallow_release: None,
+        swallow_release: Vec::new(),
+        capture_chord: Vec::new(),
+        capture_down: 0,
         scroll_carry: Default::default(),
         inert: false,
     };
@@ -671,17 +675,31 @@ fn run(
                         eprintln!("reloaded config has no usable mode; keeping the running one");
                         None
                     } else {
+                        // The *active* profile, resolved once. Every setting below used
+                        // to come from `startup_profile`, which is the configured default —
+                        // so after switching profiles the modes changed but the profile's own
+                        // settings did not, and the readout kept naming the old one.
+                        let active = reload_profile
+                            .as_deref()
+                            .and_then(|slug| fresh.profile(slug))
+                            .or_else(|| fresh.startup_profile());
+                        let slug = reload_profile
+                            .clone()
+                            .filter(|s| fresh.profile(s).is_some())
+                            .or_else(|| {
+                                fresh.profile_slugs().first().cloned()
+                            })
+                            .unwrap_or_else(|| "default".into());
+
                         Some(runtime::Reloaded {
                             modes: Modes::new(rebuilt, 0),
-                            destroy_tablet_on_leave: fresh
-                                .startup_profile()
+                            destroy_tablet_on_leave: active
                                 .is_some_and(|p| p.destroy_tablet_on_leave),
-                            tablet_emits_mouse_clicks: fresh
-                                .startup_profile()
+                            tablet_emits_mouse_clicks: active
                                 .is_some_and(|p| p.tablet_emits_mouse_clicks),
-                            freeze_position_while_scrolling: fresh
-                                .startup_profile()
+                            freeze_position_while_scrolling: active
                                 .is_some_and(|p| p.freeze_position_while_scrolling),
+                            scroll_freeze_ms: active.map_or(250, |p| p.scroll_freeze_ms),
                             scroll_freeze: fresh
                                 .root
                                 .data()
@@ -689,9 +707,10 @@ fn run(
                                 .iter()
                                 .map(|(k, v)| (k.clone(), *v))
                                 .collect(),
-                            scroll_freeze_ms: fresh
-                                .startup_profile()
-                                .map_or(250, |p| p.scroll_freeze_ms),
+                            profile_name: active
+                                .and_then(|p| p.display_name.clone())
+                                .unwrap_or_else(|| slug.clone()),
+                            profile_slug: slug,
                         })
                     }
                 }
@@ -809,7 +828,7 @@ fn stage_bindings(
     slug: &str,
     stage: &str,
     param: &str,
-) -> Vec<u16> {
+) -> Vec<Vec<u16>> {
     let Some(entry) = preset.stages.iter().find(|s| s.kind == stage) else {
         return Vec::new();
     };
@@ -824,17 +843,27 @@ fn stage_bindings(
             .collect(),
         _ => Vec::new(),
     };
+    // **Each entry is a chord**: `KEY_LEFTCTRL+KEY_A+BTN_MIDDLE` engages only while all three
+    // are held. A chord with any unreadable part is dropped whole rather than silently
+    // degraded to the parts that parsed — half a chord would fire on its own, which is worse
+    // than a binding that plainly does nothing.
     names
         .iter()
-        .filter_map(|name| match stabmouse_input::code_for(name) {
-            Some(code) => Some(code),
-            None => {
-                eprintln!(
-                    "preset '{slug}': '{name}' is not a key or button name; \
-                     {stage} will not engage on it"
-                );
-                None
+        .filter_map(|entry| {
+            let mut codes = Vec::new();
+            for part in entry.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+                match stabmouse_input::code_for(part) {
+                    Some(code) => codes.push(code),
+                    None => {
+                        eprintln!(
+                            "preset '{slug}': '{part}' is not a key or button name; \
+                             {stage} will not engage on '{entry}'"
+                        );
+                        return None;
+                    }
+                }
             }
+            (!codes.is_empty()).then_some(codes)
         })
         .collect()
 }

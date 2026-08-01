@@ -126,8 +126,12 @@ pub struct Runtime {
     pub capture_until: Option<Instant>,
     /// The captured button's name, waiting for a frontend to collect it.
     pub captured: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// A button whose release must be swallowed, having swallowed its press.
-    pub swallow_release: Option<u16>,
+    /// Buttons whose releases must be swallowed, their presses having been swallowed.
+    pub swallow_release: Vec<u16>,
+    /// Names captured so far in the current chord.
+    pub capture_chord: Vec<String>,
+    /// How many captured buttons are still held, so the chord knows when it is finished.
+    pub capture_down: usize,
     /// Fractional scroll owed to each wheel axis, kept separately per resolution.
     ///
     /// The `scroll` stage produces fractional notches, and both wheel axes are integers with
@@ -178,6 +182,10 @@ pub struct Reloaded {
     pub freeze_position_while_scrolling: bool,
     pub scroll_freeze_ms: u64,
     pub scroll_freeze: Vec<(String, bool)>,
+    /// What the reload settled on, so the published state names the live profile rather than
+    /// the one the daemon happened to start with.
+    pub profile_slug: String,
+    pub profile_name: String,
 }
 
 /// Fractional scroll owed, per axis and per resolution.
@@ -544,8 +552,26 @@ impl Runtime {
                         .current()
                         .map(|m| m.name.clone())
                         .unwrap_or_else(|| "none".into());
+
+                    // Republish what the reload actually produced. Without this the dashboard
+                    // kept naming the profile the daemon started with, however many times it
+                    // was switched — the modes changed underneath a readout that did not.
+                    let modes = self.modes.infos();
+                    let slot = (self.modes.current_index() + 1) as u32;
+                    let mode_name = name.clone();
+                    let profile_name = fresh.profile_name.clone();
+                    let profile_slug = fresh.profile_slug.clone();
+                    self.published.publish(move |s| {
+                        s.profile = profile_name;
+                        s.profile_slug = profile_slug;
+                        s.modes = modes;
+                        s.mode_slot = slot;
+                        s.mode_name = mode_name;
+                    });
+
                     println!(
-                        "config reloaded — mode {} ({name})",
+                        "config reloaded — profile '{}', mode {} ({name})",
+                        fresh.profile_slug,
                         self.modes.current_index() + 1
                     );
                     notify::mode("config reloaded", &name);
@@ -927,24 +953,46 @@ impl Runtime {
         };
         if Instant::now() >= until {
             self.capture_until = None;
+            self.capture_chord.clear();
+            self.capture_down = 0;
             return false;
         }
-        // The press, not the release: a release would arrive after the user had already let
-        // go, and reads as the binding being registered late.
-        let Some((code, _)) = report.keys.iter().find(|(_, pressed)| *pressed) else {
-            return false;
-        };
-        // `Debug` renders the evdev name — `BTN_SIDE` — which is exactly the string the
-        // config takes, so a captured binding round-trips without a translation table.
-        let name = format!("{:?}", evdev::KeyCode::new(*code));
-        if let Ok(mut slot) = self.captured.lock() {
-            *slot = Some(name.clone());
+        if report.keys.is_empty() {
+            // Motion during a capture is swallowed too. The hand is reaching for a button,
+            // not pointing at anything, and letting the cursor wander mid-bind is noise.
+            return true;
         }
-        self.capture_until = None;
-        println!("captured binding: {name}");
-        // Swallow the release too, which arrives in a later report — otherwise the
-        // application under the cursor sees a button-up it never saw pressed.
-        self.swallow_release = Some(*code);
+
+        for (code, pressed) in &report.keys {
+            if *pressed {
+                // **Accumulated, not taken on the first press**: `Ctrl+A+Middle` is one
+                // binding, so the chord is whatever was held together, and the mouse's share
+                // of it is however many of its buttons were down at once.
+                //
+                // `Debug` renders the evdev name — `BTN_SIDE` — which is exactly what the
+                // config takes, so a capture round-trips without a translation table.
+                let name = format!("{:?}", evdev::KeyCode::new(*code));
+                if !self.capture_chord.contains(&name) {
+                    self.capture_chord.push(name);
+                }
+                self.capture_down += 1;
+                self.swallow_release.push(*code);
+            } else {
+                self.capture_down = self.capture_down.saturating_sub(1);
+            }
+        }
+
+        // Published when the hand lets go of everything, which is how a chord announces that
+        // it is finished. Waiting for a timeout instead would make every bind feel slow.
+        if self.capture_down == 0 && !self.capture_chord.is_empty() {
+            let chord = self.capture_chord.join("+");
+            if let Ok(mut slot) = self.captured.lock() {
+                *slot = Some(chord.clone());
+            }
+            println!("captured binding: {chord}");
+            self.capture_until = None;
+            self.capture_chord.clear();
+        }
         true
     }
 
@@ -985,17 +1033,24 @@ impl Runtime {
         }
     }
 
-    /// A mouse button is answered from the grabbed device's own state; a keyboard key from
-    /// the listener. An empty list is never held, which is what makes a stage that waits for
-    /// a binding inert rather than stuck on when nothing is bound.
-    fn any_held(&self, codes: &[u16]) -> bool {
-        codes.iter().any(|code| {
-            if stabmouse_input::is_mouse_button(*code) {
-                self.buttons_held.contains(code)
-            } else {
-                self.listener.as_ref().is_some_and(|l| l.is_held(*code))
-            }
-        })
+    /// Whether any chord is fully held.
+    ///
+    /// A mouse button is answered from the grabbed device's own state; a keyboard key from the
+    /// listener. An empty list is never held, which is what makes a stage that waits for a
+    /// binding inert rather than stuck on when nothing is bound — and an empty *chord* would
+    /// otherwise be vacuously true, which would leave it permanently engaged.
+    fn any_held(&self, chords: &[Vec<u16>]) -> bool {
+        chords
+            .iter()
+            .any(|chord| !chord.is_empty() && chord.iter().all(|c| self.code_held(*c)))
+    }
+
+    fn code_held(&self, code: u16) -> bool {
+        if stabmouse_input::is_mouse_button(code) {
+            self.buttons_held.contains(&code)
+        } else {
+            self.listener.as_ref().is_some_and(|l| l.is_held(code))
+        }
     }
 
     fn handle(
@@ -1007,14 +1062,24 @@ impl Runtime {
         if self.capture_button(report) {
             return Ok(());
         }
-        // The other half of swallowing a captured press: its release belongs to a press no
-        // application ever saw.
-        if let Some(code) = self.swallow_release {
-            if report.keys.iter().any(|(c, pressed)| *c == code && !*pressed) {
-                self.swallow_release = None;
-                if report.dx == 0 && report.dy == 0 && report.other_relative.is_empty() {
-                    return Ok(());
+        // The other half of swallowing a captured press: those releases belong to presses no
+        // application ever saw, so passing them on would leave a button-up with no button-down.
+        if !self.swallow_release.is_empty() {
+            let mut swallowed_any = false;
+            for (code, pressed) in &report.keys {
+                if !*pressed {
+                    if let Some(i) = self.swallow_release.iter().position(|c| c == code) {
+                        self.swallow_release.swap_remove(i);
+                        swallowed_any = true;
+                    }
                 }
+            }
+            if swallowed_any
+                && report.dx == 0
+                && report.dy == 0
+                && report.other_relative.is_empty()
+            {
+                return Ok(());
             }
         }
 

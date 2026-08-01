@@ -4829,6 +4829,7 @@ dependencies = [
  "slint",
  "slint-build",
  "stabmouse-config",
+ "stabmouse-input",
  "stabmouse-ipc",
  "toml 0.8.23",
  "zbus",

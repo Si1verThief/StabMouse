@@ -14,14 +14,17 @@ pub struct Mode {
     /// Built up front. Switching is an index change, never a config load — the pipeline for
     /// every slot is resident before the hotkey is ever pressed.
     pub pipeline: Pipeline,
-    /// evdev codes of this mode's scroll-gesture buttons. Any of them engages it.
-    pub scroll_button: Vec<u16>,
-    /// evdev codes of this mode's constrain modifiers. Any of them engages it.
+    /// Chords that engage this mode's scroll gesture. Any chord, all of its parts.
+    pub scroll_button: Vec<Vec<u16>>,
+    /// Chords that engage this mode's constrain modifier.
     ///
     /// Resolved once at build time rather than per sample: the name-to-code lookup is a string
-    /// comparison against the whole evdev table, which has no business on the hot path. A list
-    /// rather than one, because which button is free depends on what the hand is doing.
-    pub modifier: Vec<u16>,
+    /// comparison against the whole evdev table, which has no business on the hot path.
+    ///
+    /// **A list of chords**, not a list of codes. The outer list is alternatives — which
+    /// button is free depends on what the hand is doing — and each inner list must be held
+    /// together, so `Ctrl+A+Middle` is one binding rather than three.
+    pub modifier: Vec<Vec<u16>>,
 }
 
 pub struct Modes {

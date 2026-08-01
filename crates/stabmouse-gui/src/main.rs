@@ -12,6 +12,7 @@
 
 mod desktop;
 mod history;
+mod keys;
 mod presets;
 mod profiles;
 
@@ -30,6 +31,7 @@ use std::rc::Rc;
 struct View {
     connected: bool,
     profile: String,
+    profile_slug: String,
     slot: i32,
     mode_name: String,
     enabled: bool,
@@ -90,6 +92,7 @@ fn gather() -> View {
     View {
         connected: true,
         profile: text(&status, "profile"),
+        profile_slug: text(&status, "profile_slug"),
         slot,
         mode_name: text(&status, "mode_name"),
         enabled: flag(&status, "enabled"),
@@ -114,6 +117,7 @@ fn gather() -> View {
 fn apply(app: &App, view: View) {
     app.set_connected(view.connected);
     app.set_profile(view.profile.into());
+    app.set_active_profile_slug(view.profile_slug.into());
     app.set_active_slot(view.slot);
     app.set_mode_name(view.mode_name.into());
     app.set_enabled(view.enabled);
@@ -427,6 +431,25 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // One undo stack for the window, shared by every action that touches a file.
     let history: Rc<RefCell<history::History>> = Rc::new(RefCell::new(history::History::default()));
+
+    // **A Slint timer stops the moment its handle drops.** The first press-to-bind created one
+    // inside the handler, so it was destroyed as that function returned and never fired once —
+    // the daemon captured the button and reported it correctly, and nothing was ever there to
+    // collect it. Owning the handle here keeps it running for the life of the window.
+    let capture_timer: Rc<slint::Timer> = Rc::new(slint::Timer::default());
+
+    /// The keyboard half of a chord, built here while the daemon builds the mouse half.
+    #[derive(Default)]
+    struct KeyChord {
+        /// Names held, in press order, so `Ctrl+A` reads the way it was typed.
+        parts: Vec<String>,
+        /// Non-modifier keys still down. A chord is finished when the hand lets go.
+        down: usize,
+        /// Set once everything is released, so the poll can allow a moment for a mouse
+        /// button to arrive before committing a keyboard-only chord.
+        released_at: Option<std::time::Instant>,
+    }
+    let chord: Rc<RefCell<KeyChord>> = Rc::new(RefCell::new(KeyChord::default()));
 
     /// Snapshot a file before changing it, so the change can be taken back.
     fn remember(history: &Rc<RefCell<history::History>>, path: &std::path::Path, what: &str) {
@@ -754,10 +777,47 @@ fn main() -> Result<(), slint::PlatformError> {
     // side polls for the answer and stops on the first of: a capture, a cancel, or a timeout
     // matching the daemon's own window — a control that waits forever is one the user cannot
     // tell from a broken one.
+    // Keys arrive here; the daemon reports buttons. Neither can see the other's, which is why
+    // both halves exist — and why a chord is only complete once both have had their say.
+    let chord_for_down = chord.clone();
+    app.on_key_down(move |text, ctrl, alt, shift, meta| {
+        let mut chord = chord_for_down.borrow_mut();
+        for name in keys::modifier_names(ctrl, alt, shift, meta) {
+            if !chord.parts.contains(&name) {
+                chord.parts.push(name);
+            }
+        }
+        if let Some(name) = keys::evdev_name(text.as_str()) {
+            if !keys::is_modifier(&name) {
+                chord.down += 1;
+                if !chord.parts.contains(&name) {
+                    chord.parts.push(name);
+                }
+            }
+        }
+        chord.released_at = None;
+    });
+
+    let chord_for_up = chord.clone();
+    app.on_key_up(move |text| {
+        let mut chord = chord_for_up.borrow_mut();
+        if let Some(name) = keys::evdev_name(text.as_str()) {
+            if !keys::is_modifier(&name) {
+                chord.down = chord.down.saturating_sub(1);
+            }
+        }
+        if chord.down == 0 && !chord.parts.is_empty() {
+            chord.released_at = Some(std::time::Instant::now());
+        }
+    });
+
     let weak = app.as_weak();
     let hist = history.clone();
+    let timer = capture_timer.clone();
+    let chord_for_listen = chord.clone();
     app.on_listen_binding(move |stage_index, key| {
         let Some(app) = weak.upgrade() else { return };
+        *chord_for_listen.borrow_mut() = KeyChord::default();
         if Client::connect().and_then(|c| c.capture_binding()).is_err() {
             notice(&app, "no daemon is running, so it cannot watch for a button");
             return;
@@ -766,13 +826,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
         let weak = app.as_weak();
         let hist = hist.clone();
+        let chord = chord_for_listen.clone();
         let key = key.to_string();
         let mut waited = std::time::Duration::ZERO;
         let poll = std::time::Duration::from_millis(80);
         // The daemon gives up after 8s; matching that keeps the two ends agreeing about
         // whether a capture is still live.
         let limit = std::time::Duration::from_secs(8);
-        slint::Timer::default().start(
+        timer.start(
             slint::TimerMode::Repeated,
             poll,
             move || {
@@ -782,24 +843,54 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 }
                 waited += poll;
-                let got = Client::connect()
+                let buttons = Client::connect()
                     .and_then(|c| c.take_captured_binding())
                     .unwrap_or_default();
-                if !got.is_empty() {
-                    app.set_listening_for(Default::default());
-                    if let Some(path) = selected_preset_path(&app) {
-                        remember(&hist, &path, "add binding");
-                        let selected = app.get_selected_preset().max(0) as usize;
-                        after!(
-                            app,
-                            presets::add_binding(&path, stage_index.max(0) as usize, &key, &got),
-                            apply_presets(&app, selected)
-                        );
-                        show_undo(&app, &hist);
+
+                // A chord is done when the daemon has published its buttons, or when the keys
+                // have been released long enough that no button is coming. The grace is what
+                // lets `Ctrl+A+Middle` arrive as one binding rather than as two races.
+                const GRACE: std::time::Duration = std::time::Duration::from_millis(350);
+                let keys_settled = chord
+                    .borrow()
+                    .released_at
+                    .is_some_and(|t| t.elapsed() >= GRACE);
+
+                let ready = !buttons.is_empty() || keys_settled;
+                if !ready {
+                    if waited >= limit {
+                        app.set_listening_for(Default::default());
+                        notice(&app, "nothing was pressed, so nothing was bound");
                     }
-                } else if waited >= limit {
-                    app.set_listening_for(Default::default());
+                    return;
+                }
+
+                // Keys first, then buttons, so a chord reads the way a person writes one.
+                let mut parts = chord.borrow().parts.clone();
+                if !buttons.is_empty() {
+                    parts.extend(buttons.split('+').map(str::to_string));
+                }
+                *chord.borrow_mut() = KeyChord::default();
+                app.set_listening_for(Default::default());
+                if parts.is_empty() {
                     notice(&app, "nothing was pressed, so nothing was bound");
+                    return;
+                }
+                let combined = parts.join("+");
+                if let Some(path) = selected_preset_path(&app) {
+                    remember(&hist, &path, "add binding");
+                    let selected = app.get_selected_preset().max(0) as usize;
+                    after!(
+                        app,
+                        presets::add_binding(
+                            &path,
+                            stage_index.max(0) as usize,
+                            &key,
+                            &combined
+                        ),
+                        apply_presets(&app, selected)
+                    );
+                    show_undo(&app, &hist);
                 }
             },
         );

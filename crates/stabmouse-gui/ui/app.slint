@@ -288,8 +288,10 @@ component Field inherits Rectangle {
     border-color: inner.has-focus ? Theme.accent : Theme.line;
     background: Theme.ground;
 
-    // Behind the input, so it never takes the space the input needs.
-    if root.text == "" && !inner.has-focus: Text {
+    // Keyed on what the *input* holds, not on the property it was seeded with. Keying it on
+    // the property left the placeholder sitting over text the user had typed the moment focus
+    // moved away, because the property never changes for a field that starts empty.
+    if inner.text == "": Text {
         x: 9px;
         text: root.placeholder;
         font-size: Theme.size-muted;
@@ -536,6 +538,9 @@ export component App inherits Window {
 
     in property <bool> connected;
     in property <string> profile;
+    /// The profile the daemon is actually running, by slug — the display name is decoration
+    /// and two profiles may share one.
+    in property <string> active-profile-slug;
     in property <int> active-slot;
     in property <string> mode-name;
     in property <bool> enabled;
@@ -595,18 +600,33 @@ export component App inherits Window {
     callback set-default-slot(int);
     callback undo();
     callback listen-binding(int, string);
+    callback key-down(string, bool, bool, bool, bool);
+    callback key-up(string);
     callback cancel-listen();
     callback remove-binding(int, string, string);
     callback switch-profile(string);
 
-    // Escape leaves press-to-bind, which is the way out every capture control owes the user.
-    FocusScope {
+    // Keys are captured here, buttons by the daemon — each side sees what only it can see.
+    // Escape leaves, which is the way out every capture control owes the user.
+    keycap := FocusScope {
         key-pressed(event) => {
-            if (event.text == Key.Escape && listening-for != "") {
+            if (listening-for == "") {
+                return reject;
+            }
+            if (event.text == Key.Escape) {
                 cancel-listen();
                 return accept;
             }
-            reject
+            key-down(event.text, event.modifiers.control, event.modifiers.alt,
+                     event.modifiers.shift, event.modifiers.meta);
+            accept
+        }
+        key-released(event) => {
+            if (listening-for == "") {
+                return reject;
+            }
+            key-up(event.text);
+            accept
         }
     }
 
@@ -1083,7 +1103,12 @@ export component App inherits Window {
                                         if pr.kind == "binding": BindingControl {
                                             bound: pr.options;
                                             listening: listening-for == pr.stage-index + "/" + pr.key;
-                                            listen() => { listen-binding(pr.stage-index, pr.key); }
+                                            listen() => {
+                                                // The scope must hold focus before the user
+                                                // presses anything, or the first key is lost.
+                                                keycap.focus();
+                                                listen-binding(pr.stage-index, pr.key);
+                                            }
                                             cancel() => { cancel-listen(); }
                                             remove(name) => { remove-binding(pr.stage-index, pr.key, name); }
                                         }
@@ -1143,7 +1168,10 @@ export component App inherits Window {
                             vertical-alignment: center;
                         }
                         for entry[i] in profiles: NavItem {
-                            label: entry.name;
+                            // The running profile is marked in the list, not only in the
+                            // header — otherwise "which one is live" needs a click to answer.
+                            label: entry.slug == active-profile-slug
+                                ? entry.name + "  ●" : entry.name;
                             selected: i == selected-profile;
                             clicked => { selected-profile = i; select-profile(i); }
                         }
@@ -1177,11 +1205,21 @@ export component App inherits Window {
                             Rectangle { horizontal-stretch: 1; }
                             // Switching is a daemon action, not a file edit, so it sits apart
                             // from the editing controls and says which profile is live.
-                            if profiles.length > 0 && connected: Button {
-                                label: profiles[selected-profile].slug == profile
-                                    ? "Active" : "Switch to this";
-                                primary: profiles[selected-profile].slug != profile;
+                            // Compared by slug, not by display name: the name is decoration
+                            // and need not be unique, so comparing it left the button offering
+                            // to switch to the profile already running.
+                            if profiles.length > 0 && connected
+                                && profiles[selected-profile].slug != active-profile-slug: Button {
+                                label: "Switch to this";
+                                primary: true;
                                 clicked => { switch-profile(profiles[selected-profile].slug); }
+                            }
+                            if profiles.length > 0 && connected
+                                && profiles[selected-profile].slug == active-profile-slug: Text {
+                                text: "● running";
+                                font-size: Theme.size-muted;
+                                color: Theme.success;
+                                vertical-alignment: center;
                             }
                             if undo-label != "": Button {
                                 label: "Undo " + undo-label;

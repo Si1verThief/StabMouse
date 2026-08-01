@@ -438,6 +438,25 @@ catch_up = 0.35
     }
 
     #[test]
+    fn a_chord_survives_the_round_trip_the_daemon_will_make() {
+        // The binding the editor writes has to be one the daemon can resolve, part by part.
+        // A chord that looked right in the file and silently never fired would be the worst
+        // possible outcome of press-to-bind.
+        let p = write_temp("chord", "schema = 1\n[[stage]]\ntype = \"snap\"\n");
+        add_binding(&p, 0, "modifier", "KEY_LEFTCTRL+KEY_A+BTN_MIDDLE").unwrap();
+        let loaded = load_one(&p).unwrap();
+        let raw = &loaded.stages[0].params.iter().find(|q| q.key == "modifier").unwrap().raw;
+        let entries = binding_names(raw);
+        assert_eq!(entries, ["KEY_LEFTCTRL+KEY_A+BTN_MIDDLE"]);
+        for part in entries[0].split('+') {
+            assert!(
+                stabmouse_input::code_for(part).is_some(),
+                "the daemon could not resolve '{part}'"
+            );
+        }
+    }
+
+    #[test]
     fn an_uncatalogued_key_still_gets_a_readable_label() {
         // Reachable only for a key this build predates — but that key must still be legible
         // rather than raw, and must never be hidden.

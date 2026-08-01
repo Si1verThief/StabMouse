@@ -38,6 +38,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub profile: String,
+    /// The profile's filename identity, which is what a client must send back to switch to
+    /// it — the display name is decoration and need not be unique.
+    pub profile_slug: String,
     pub mode_slot: u32,
     pub mode_name: String,
     pub enabled: bool,
@@ -378,6 +381,7 @@ impl Daemon {
             }
         };
         put("profile", Value::from(s.profile.clone()));
+        put("profile_slug", Value::from(s.profile_slug.clone()));
         put("mode_slot", Value::from(s.mode_slot));
         put("mode_name", Value::from(s.mode_name.clone()));
         put("enabled", Value::from(s.enabled));
