@@ -112,6 +112,13 @@ pub struct Scroll {
     /// releasing it is the natural "stop" — and only for a chord in the other modes, where a
     /// single button has no halfway state to coast in.
     pub full_release_stops_momentum: bool,
+    /// Which gesture slot on the sample carries this instance's binding.
+    ///
+    /// Assigned by the assembler in pipeline order, and matched by the daemon when it resolves
+    /// bindings. A preset with a wheel gesture and a drag gesture is two instances with two
+    /// bindings, and without a slot each they shared one — holding the wheel's modifier
+    /// engaged the drag as well.
+    pub slot: usize,
 
     /// Displacement from the press origin, millimetres.
     offset_x: f64,
@@ -165,6 +172,7 @@ impl Scroll {
             wheel_gain: 1.0,
             always_active: false,
             full_release_stops_momentum: false,
+            slot: 0,
             offset_x: 0.0,
             offset_y: 0.0,
             carry_x: 0.0,
@@ -271,7 +279,7 @@ impl Stage for Scroll {
 
         let dt = if s.dt.is_finite() && s.dt > 0.0 { s.dt } else { 0.0 };
         let sign = if self.invert { -1.0 } else { 1.0 };
-        let active = self.engaged(s.scrolling);
+        let active = self.engaged(s.gesture(self.slot));
 
         // `wheel` has its own shape and takes it here, rather than being threaded through a
         // body written for a gesture that diverts hand movement. There is no press origin, no
@@ -324,7 +332,7 @@ impl Stage for Scroll {
             }
             // Letting go of the modifier is the brake, on the same binding rather than a
             // second one to find. A chord still coasts while any part is held.
-            if !acting && self.full_release_stops_momentum && !s.scroll_partial {
+            if !acting && self.full_release_stops_momentum && !s.gesture_partial(self.slot) {
                 self.glide_x = 0.0;
                 self.glide_y = 0.0;
                 // The spin too, or the next notch would inherit a rate from before the brake
@@ -337,7 +345,7 @@ impl Stage for Scroll {
         if !active {
             // Letting go of the whole chord is a brake. Checked before the glide runs, so a
             // full release stops the page on the same sample rather than a frame later.
-            if self.full_release_stops_momentum && !s.scroll_partial {
+            if self.full_release_stops_momentum && !s.gesture_partial(self.slot) {
                 self.glide_x = 0.0;
                 self.glide_y = 0.0;
             }
@@ -347,7 +355,7 @@ impl Stage for Scroll {
                 // which is what stops a careful drag from drifting after the hand stops.
                 if self.momentum
                     && self.mode != Mode::Joystick
-                    && !(self.full_release_stops_momentum && !s.scroll_partial)
+                    && !(self.full_release_stops_momentum && !s.gesture_partial(self.slot))
                 {
                     self.glide_x = self.rate_x;
                     self.glide_y = self.rate_y;
@@ -468,7 +476,7 @@ mod tests {
         for (i, (dx, dy, held)) in steps.iter().enumerate() {
             let mut s = Sample::new(*dx, *dy, (i as u64 + 1) * 1000, false);
             s.dt = 0.001;
-            s.scrolling = *held;
+            s.set_gesture(0, *held, *held);
             stage.process(&mut s);
             sx += s.scroll_x;
             sy += s.scroll_y;
@@ -643,16 +651,14 @@ mod tests {
             for i in 0..12 {
                 let mut s = Sample::new(0.0, 3.0, (i + 1) * 1000, false);
                 s.dt = 0.001;
-                s.scrolling = true;
-                s.scroll_partial = true;
+                s.set_gesture(0, true, true);
                 stage.process(&mut s);
             }
             // Then let go of the gesture, keeping (or not) a part of the chord held.
             for i in 0..40 {
                 let mut s = Sample::new(0.0, 0.0, (i + 100) * 1000, false);
                 s.dt = 0.001;
-                s.scrolling = false;
-                s.scroll_partial = still_partly_held;
+                s.set_gesture(0, false, still_partly_held);
                 stage.process(&mut s);
                 scrolled += s.scroll_y;
             }
@@ -710,8 +716,7 @@ mod tests {
         s.dt = 0.001;
         s.wheel_v = 3.0;
         s.wheel_h = -2.0;
-        s.scrolling = held;
-        s.scroll_partial = held;
+        s.set_gesture(0, held, held);
         s
     }
 
@@ -854,6 +859,44 @@ mod tests {
     }
 
     #[test]
+    fn two_gestures_in_one_pipeline_answer_to_their_own_bindings() {
+        // The bug: a preset carrying a wheel gesture and a drag gesture shared one flag, so
+        // holding the wheel's modifier started the drag as well. Each instance reads its own
+        // slot now, and the daemon fills one slot per instance.
+        let mut wheel = Scroll::new(Mode::Wheel);
+        wheel.slot = 0;
+        let mut drag = Scroll::new(Mode::Drag);
+        drag.slot = 1;
+
+        // Slot 0 held — the wheel's modifier — and slot 1 not.
+        let mut s = Sample::new(0.0, 4.0, 1000, false);
+        s.dt = 0.008;
+        s.wheel_v = 1.0;
+        s.set_gesture(0, true, true);
+
+        wheel.process(&mut s);
+        drag.process(&mut s);
+
+        assert_eq!(s.scroll_y, 1.0, "the wheel gesture must act on its own binding");
+        assert_eq!((s.dx, s.dy), (0.0, 4.0), "and the drag must not have eaten the motion");
+    }
+
+    #[test]
+    fn a_gesture_past_the_slot_cap_is_inert_rather_than_stuck_on() {
+        // Out-of-range reads answer "not held". The alternative — wrapping, or defaulting to
+        // slot 0 — would leave the extra stage engaging on someone else's binding, which is
+        // the exact failure this whole change exists to remove.
+        let mut stage = Scroll::new(Mode::Drag);
+        stage.slot = crate::MAX_GESTURES + 3;
+        let mut s = Sample::new(0.0, 4.0, 1000, false);
+        s.dt = 0.008;
+        s.set_gesture(0, true, true);
+        stage.process(&mut s);
+        assert_eq!((s.dx, s.dy), (0.0, 4.0), "it must not engage on another slot's binding");
+        assert_eq!(s.scroll_y, 0.0);
+    }
+
+    #[test]
     fn invert_flips_the_wheel_too() {
         // It did not, for as long as `wheel` existed: `sign` was computed and then never
         // reached the one branch that needed it. An uninverted wheel still scrolls, so the
@@ -890,8 +933,7 @@ mod tests {
             let mut s = Sample::new(0.0, 0.0, (i + 1) * 1000, false);
             s.dt = 0.008;
             s.wheel_v = 1.0;
-            s.scrolling = true;
-            s.scroll_partial = true;
+            s.set_gesture(0, true, true);
             stage.process(&mut s);
         }
         // Modifier still down, wheel now still: the page must keep moving.
@@ -899,8 +941,7 @@ mod tests {
         for i in 0..20 {
             let mut s = Sample::new(0.0, 0.0, (i + 100) * 1000, false);
             s.dt = 0.008;
-            s.scrolling = true;
-            s.scroll_partial = true;
+            s.set_gesture(0, true, true);
             stage.process(&mut s);
             coasted += s.scroll_y;
         }
@@ -919,8 +960,7 @@ mod tests {
                 let mut s = Sample::new(0.0, 0.0, (i + 1) * 1000, false);
                 s.dt = 0.008;
                 s.wheel_v = 1.0;
-                s.scrolling = true;
-                s.scroll_partial = true;
+                s.set_gesture(0, true, true);
                 stage.process(&mut s);
             }
             let mut coasted = 0.0;
@@ -946,7 +986,7 @@ mod tests {
             for (dx, dy) in [(0.0, 0.0), (f64::NAN, 1.0), (1e300, -1e300), (0.1, 0.1)] {
                 let mut s = Sample::new(dx, dy, 1000, false);
                 s.dt = 0.001;
-                s.scrolling = true;
+                s.set_gesture(0, true, true);
                 stage.process(&mut s);
                 assert!(s.scroll_x.is_finite() && s.scroll_y.is_finite());
             }

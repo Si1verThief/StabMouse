@@ -303,6 +303,29 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | `joystick.gain` | f64 | Scroll rate per mm of displacement |
 | `hi_res` | bool | Emit `REL_WHEEL_HI_RES` — always on, see below |
 
+### Several scroll stages, several bindings
+
+A preset may carry more than one `scroll` stage, and the obvious pairing is a `wheel` gesture
+on a modifier alongside a `drag` gesture on a chord. **Each instance answers only to its own
+binding.**
+
+That took a fix. The sample carried one "the gesture is held" flag for the whole pipeline and
+the daemon resolved one binding per *mode*, reading whichever `scroll` stage came first — so
+every scroll stage in a preset engaged on the first one's binding. A wheel gesture on Alt
+started an Alt+Middle drag the moment Alt went down, and the drag's own binding was never read
+at all.
+
+Each instance now has a **gesture slot**, handed out by the assembler in pipeline order and
+matched by the daemon when it resolves bindings. The two agree because the pinned-order sort is
+stable and `scroll` is neither pinned first nor last, so no reordering can change how scroll
+instances sit relative to each other. Eight slots, which is far past what a hand can hold
+bindings for; beyond that the assembler warns and shares the last slot rather than dropping a
+stage. A slot past the cap reads as *not held*, so an extra stage is inert rather than engaging
+on someone else's binding.
+
+The daemon names each instance at startup — `scroll[0]`, `scroll[1]` — with its mode, binding
+and whether it claims the wheel.
+
 **There is no `off` mode.** Every stage already has `enabled`, which turns it off without
 losing its tuning; a second way to say the same thing reads as a setting that does
 something the user has not been told about. Removed after exactly that confusion.

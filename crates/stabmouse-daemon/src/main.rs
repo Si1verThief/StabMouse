@@ -557,7 +557,7 @@ fn run(
     let keyboard_codes: Vec<u16> = modes
         .slots()
         .iter()
-        .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()))
+        .flat_map(|m| m.modifier.iter().chain(m.scroll_buttons.iter().flatten()))
         .flatten()
         .copied()
         .filter(|c| !stabmouse_input::is_mouse_button(*c))
@@ -763,7 +763,7 @@ fn build_modes(
             preset: stabmouse_config::RAW.into(),
             pipeline: stabmouse_core::Pipeline::new(vec![]),
             modifier: Vec::new(),
-            scroll_button: Vec::new(),
+            scroll_buttons: Vec::new(),
             passthrough: Default::default(),
             scroll_uses_wheel: false,
         }];
@@ -788,7 +788,7 @@ fn build_modes(
                 preset: m.preset.clone(),
                 pipeline: stabmouse_core::Pipeline::new(vec![]),
                 modifier: Vec::new(),
-                scroll_button: Vec::new(),
+                scroll_buttons: Vec::new(),
                     passthrough: Default::default(),
                 scroll_uses_wheel: false,
             });
@@ -809,8 +809,15 @@ fn build_modes(
                 names.join(" -> ")
             );
         }
-        if let Some(line) = scroll_summary(preset, &m.preset) {
+        for line in scroll_summary(preset, &m.preset) {
             println!("  mode '{}' {line}", m.name);
+        }
+        if preset.stages.iter().any(|s| s.kind == "scroll") {
+            println!(
+                "  mode '{}' passthrough: {:?}",
+                m.name,
+                stage_passthrough(preset)
+            );
         }
         out.push(Mode {
             name: m.name.clone(),
@@ -818,7 +825,7 @@ fn build_modes(
             preset: m.preset.clone(),
             pipeline: assembly.pipeline,
             modifier: stage_bindings(preset, &m.preset, "snap", "modifier"),
-            scroll_button: stage_bindings(preset, &m.preset, "scroll", "button"),
+            scroll_buttons: gesture_bindings(preset, &m.preset, "scroll", "button"),
             passthrough: stage_passthrough(preset),
             scroll_uses_wheel: scroll_uses_wheel(preset),
         });
@@ -837,6 +844,28 @@ fn build_modes(
 /// mouse hand is busy and a modifier key while it is not, and forcing a choice between them
 /// is a worse answer than accepting both. A single string still works — the common case reads
 /// the same as it always did.
+/// One binding list per instance of `stage`, in the order the assembler assigns gesture slots.
+///
+/// The plural of [`stage_bindings`], and the whole reason it exists: reading only the first
+/// instance meant a preset with two `scroll` stages had one binding between them, so holding
+/// either engaged both.
+fn gesture_bindings(
+    preset: &stabmouse_config::Preset,
+    slug: &str,
+    stage: &str,
+    param: &str,
+) -> Vec<Vec<Vec<u16>>> {
+    preset
+        .stages
+        .iter()
+        .filter(|s| s.kind == stage)
+        .map(|entry| match entry.params.get(param) {
+            Some(value) => binding_codes(value, slug, stage),
+            None => Vec::new(),
+        })
+        .collect()
+}
+
 fn stage_bindings(
     preset: &stabmouse_config::Preset,
     slug: &str,
@@ -846,9 +875,19 @@ fn stage_bindings(
     let Some(entry) = preset.stages.iter().find(|s| s.kind == stage) else {
         return Vec::new();
     };
-    let Some(value) = entry.params.get(param) else {
-        return Vec::new();
-    };
+    match entry.params.get(param) {
+        Some(value) => binding_codes(value, slug, stage),
+        None => Vec::new(),
+    }
+}
+
+/// Turn one binding value — a name, or a list of them — into chords of evdev codes.
+///
+/// **Each entry is a chord**: `KEY_LEFTCTRL+KEY_A+BTN_MIDDLE` engages only while all three are
+/// held. A chord with any unreadable part is dropped whole rather than silently degraded to
+/// the parts that parsed — half a chord would fire on its own, which is worse than a binding
+/// that plainly does nothing.
+fn binding_codes(value: &toml::Value, slug: &str, stage: &str) -> Vec<Vec<u16>> {
     let names: Vec<String> = match value {
         toml::Value::String(one) => vec![one.clone()],
         toml::Value::Array(many) => many
@@ -857,10 +896,6 @@ fn stage_bindings(
             .collect(),
         _ => Vec::new(),
     };
-    // **Each entry is a chord**: `KEY_LEFTCTRL+KEY_A+BTN_MIDDLE` engages only while all three
-    // are held. A chord with any unreadable part is dropped whole rather than silently
-    // degraded to the parts that parsed — half a chord would fire on its own, which is worse
-    // than a binding that plainly does nothing.
     names
         .iter()
         .filter_map(|entry| {
@@ -902,27 +937,40 @@ fn scroll_uses_wheel(preset: &stabmouse_config::Preset) -> bool {
 /// those has already cost a round trip of guessing. The mode is on the line because
 /// `mouse_passthrough` governs the wheel only in `wheel` mode, which is invisible from the
 /// setting itself.
-fn scroll_summary(preset: &stabmouse_config::Preset, slug: &str) -> Option<String> {
-    let stage = preset.stages.iter().find(|s| s.kind == "scroll")?;
+fn scroll_summary(preset: &stabmouse_config::Preset, slug: &str) -> Vec<String> {
+    preset
+        .stages
+        .iter()
+        .filter(|s| s.kind == "scroll")
+        .enumerate()
+        .map(|(slot, stage)| one_scroll_summary(stage, slug, slot))
+        .collect()
+}
+
+fn one_scroll_summary(
+    stage: &stabmouse_config::StageEntry,
+    slug: &str,
+    slot: usize,
+) -> String {
     let mode = stage.params.get("mode").and_then(|v| v.as_str()).unwrap_or("drag");
-    let bound = stage_bindings(preset, slug, "scroll", "button");
+    let bound = match stage.params.get("button") {
+        Some(value) => binding_codes(value, slug, "scroll"),
+        None => Vec::new(),
+    };
     let binding = match stage.params.get("button") {
         None => "unbound".to_string(),
         Some(_) if bound.is_empty() => "bound to a name that did not resolve".to_string(),
         Some(v) => format!("on {}", v.as_str().unwrap_or("a binding")),
     };
     let always = stage.params.get("always_active").and_then(|v| v.as_bool()) == Some(true);
+    let _ = slot;
     let claim = match (mode == "wheel", always || !bound.is_empty()) {
         (false, _) => "does not touch the wheel".to_string(),
         (true, false) => "claims nothing: unbound and always_active off".to_string(),
-        (true, true) => format!(
-            "claims the wheel, passthrough {:?}",
-            stage_passthrough(preset)
-        )
-        .to_lowercase(),
+        (true, true) => "claims the wheel".to_string(),
     };
     let off = if stage.enabled { "" } else { " [DISABLED]" };
-    Some(format!("scroll: {mode}, {binding} — {claim}{off}"))
+    format!("scroll[{slot}]: {mode}, {binding} — {claim}{off}")
 }
 
 fn stage_passthrough(preset: &stabmouse_config::Preset) -> stabmouse_config::Passthrough {

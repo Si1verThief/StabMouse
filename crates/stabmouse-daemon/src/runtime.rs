@@ -1105,23 +1105,29 @@ impl Runtime {
         }
     }
 
-    /// Whether a whole scroll chord is held.
-    fn scroll_held(&self) -> bool {
-        match self.modes.current() {
-            Some(mode) => self.any_held(&mode.scroll_button),
-            None => false,
-        }
-    }
-
-    /// Whether *any* part of a scroll binding is held.
+    /// Whether each scroll gesture is held, and whether any part of it is, by slot.
     ///
-    /// The halfway state of a chord: enough for a page to keep coasting, not enough to be
-    /// steering it. Equal to `scroll_held` for a single-button binding, which is why the
-    /// option that reads it is offered only for chords.
-    fn scroll_partly_held(&self) -> bool {
-        self.modes.current().is_some_and(|m| {
-            m.scroll_button.iter().flatten().any(|c| self.code_held(*c))
-        })
+    /// **One answer per stage instance.** Asked once per report and written into the sample,
+    /// so a preset carrying a wheel gesture and a drag gesture gives each its own binding
+    /// instead of engaging both on whichever was resolved first.
+    ///
+    /// The partial state is the halfway point of a chord: enough for a page to keep coasting,
+    /// not enough to be steering it. It equals the held state for a single-button binding,
+    /// which is why the option that reads it is offered only for chords — and in `wheel` mode,
+    /// where the binding is a modifier.
+    fn gesture_states(&self) -> Vec<(bool, bool)> {
+        let Some(mode) = self.modes.current() else {
+            return Vec::new();
+        };
+        mode.scroll_buttons
+            .iter()
+            .map(|chords| {
+                (
+                    self.any_held(chords),
+                    chords.iter().flatten().any(|c| self.code_held(*c)),
+                )
+            })
+            .collect()
     }
 
     /// Reopen the keyboards, so a binding added since startup is actually watched.
@@ -1135,7 +1141,7 @@ impl Runtime {
             .modes
             .slots()
             .iter()
-            .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()))
+            .flat_map(|m| m.modifier.iter().chain(m.scroll_buttons.iter().flatten()))
             .flatten()
             .filter(|c| !stabmouse_input::is_mouse_button(**c))
             .copied()
@@ -1200,7 +1206,7 @@ impl Runtime {
         let Some(mode) = self.modes.current() else {
             return false;
         };
-        let chords = || mode.scroll_button.iter().chain(mode.modifier.iter());
+        let chords = || mode.scroll_buttons.iter().flatten().chain(mode.modifier.iter());
 
         match mode.passthrough {
             Passthrough::Always => false,
@@ -1328,8 +1334,7 @@ impl Runtime {
 
         // Read before the mutable borrow of the mode below.
         let constrain = self.constrain_held();
-        let scrolling = self.scroll_held();
-        let scroll_partial = self.scroll_partly_held();
+        let gestures = self.gesture_states();
 
         let Some(mode) = self.modes.current_mut() else {
             return Ok(());
@@ -1342,8 +1347,9 @@ impl Runtime {
             *stroke_active,
         );
         sample.constrain = constrain;
-        sample.scrolling = scrolling;
-        sample.scroll_partial = scroll_partial;
+        for (slot, (held, partial)) in gestures.iter().enumerate() {
+            sample.set_gesture(slot, *held, *partial);
+        }
 
         // The physical wheel enters the pipeline so a stage may act on it. **Whatever comes
         // back out is emitted verbatim**, so a wheel nothing claims is untouched — the whole

@@ -1,5 +1,12 @@
 //! The unit of data flowing through the pipeline.
 
+/// How many separately-bound gesture stages one preset may carry.
+///
+/// A fixed cap because [`Sample`] is `Copy` and on the hot path. Eight is far past what any
+/// hand can hold bindings for; the assembler warns and shares the last slot rather than
+/// dropping a stage, so exceeding it degrades rather than vanishing.
+pub const MAX_GESTURES: usize = 8;
+
 /// One motion sample.
 ///
 /// Distances are **millimetres** and time is **microseconds taken from the source
@@ -36,18 +43,23 @@ pub struct Sample {
     /// True on the sample where the press ended.
     pub stroke_end: bool,
 
-    /// Whether the user is holding the scroll gesture's button.
+    /// Whether each bound gesture is fully held, indexed by the stage instance's slot.
     ///
-    /// Arrives on the sample for the same reason `constrain` does: a stage that asked a
-    /// device would make replay diverge from live.
-    pub scrolling: bool,
+    /// **One flag per instance, not one for the pipeline.** A preset may carry several
+    /// `scroll` stages — a wheel gesture on one binding and a drag on another is the obvious
+    /// pairing — and a single shared flag meant whichever binding the daemon happened to read
+    /// engaged all of them at once. Holding the wheel's modifier started the drag too.
+    ///
+    /// Arrives on the sample for the same reason `constrain` does: a stage that asked a device
+    /// would make replay diverge from live.
+    pub gestures: [bool; MAX_GESTURES],
 
-    /// Whether *any* part of the scroll binding is still held.
+    /// Whether *any* part of each gesture's binding is still held.
     ///
-    /// Only differs from `scrolling` for a chord: all parts down engages the gesture, some
-    /// parts down is a hand halfway off it. That middle state is what lets a chord say "let
-    /// go of one and it coasts, let go of both and it stops".
-    pub scroll_partial: bool,
+    /// Only differs from `gestures` for a chord: all parts down engages it, some parts down is
+    /// a hand halfway off. That middle state is what lets a chord say "let go of one and it
+    /// coasts, let go of both and it stops".
+    pub gestures_partial: [bool; MAX_GESTURES],
 
     /// Physical wheel movement arriving with this sample, in notches — vertical then
     /// horizontal, positive up and right.
@@ -106,8 +118,8 @@ impl Sample {
             down,
             stroke_start: false,
             stroke_end: false,
-            scrolling: false,
-            scroll_partial: false,
+            gestures: [false; MAX_GESTURES],
+            gestures_partial: [false; MAX_GESTURES],
             wheel_v: 0.0,
             wheel_h: 0.0,
             scroll_x: 0.0,
@@ -116,6 +128,27 @@ impl Sample {
             discontinuity: false,
             pressure: None,
             speed_mm_s: None,
+        }
+    }
+
+    /// Whether the gesture in `slot` is fully held. Out-of-range slots are never held, which
+    /// is what makes a stage past the cap inert rather than stuck on.
+    pub fn gesture(&self, slot: usize) -> bool {
+        self.gestures.get(slot).copied().unwrap_or(false)
+    }
+
+    /// Whether any part of `slot`'s binding is held.
+    pub fn gesture_partial(&self, slot: usize) -> bool {
+        self.gestures_partial.get(slot).copied().unwrap_or(false)
+    }
+
+    /// State one gesture's binding. Slots past the cap are dropped rather than panicking.
+    pub fn set_gesture(&mut self, slot: usize, held: bool, partial: bool) {
+        if let Some(g) = self.gestures.get_mut(slot) {
+            *g = held;
+        }
+        if let Some(g) = self.gestures_partial.get_mut(slot) {
+            *g = partial;
         }
     }
 

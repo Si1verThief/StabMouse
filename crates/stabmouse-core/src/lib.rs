@@ -35,7 +35,7 @@ pub mod stages;
 
 pub use pipeline::Pipeline;
 pub use quantize::Quantizer;
-pub use sample::Sample;
+pub use sample::{Sample, MAX_GESTURES};
 pub use stage::Stage;
 
 #[cfg(test)]

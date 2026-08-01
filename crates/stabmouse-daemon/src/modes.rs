@@ -14,8 +14,12 @@ pub struct Mode {
     /// Built up front. Switching is an index change, never a config load — the pipeline for
     /// every slot is resident before the hotkey is ever pressed.
     pub pipeline: Pipeline,
-    /// Chords that engage this mode's scroll gesture. Any chord, all of its parts.
-    pub scroll_button: Vec<Vec<u16>>,
+    /// Chords that engage each scroll gesture, one entry per stage instance in pipeline order.
+    ///
+    /// **Per instance, matching the slot the assembler gave each stage.** One list for the
+    /// whole mode meant only the first `scroll` stage's binding was ever read, and every other
+    /// scroll stage engaged on it — a wheel gesture on Alt started an Alt+Middle drag too.
+    pub scroll_buttons: Vec<Vec<Vec<u16>>>,
     /// Chords that engage this mode's constrain modifier.
     ///
     /// Resolved once at build time rather than per sample: the name-to-code lookup is a string
@@ -228,7 +232,7 @@ mod tests {
                 preset: "raw".into(),
                 pipeline: Pipeline::new(vec![]),
                 modifier: Vec::new(),
-                scroll_button: Vec::new(),
+                scroll_buttons: Vec::new(),
                 passthrough: Default::default(),
             scroll_uses_wheel: false,
             })

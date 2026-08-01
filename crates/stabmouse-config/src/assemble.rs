@@ -57,6 +57,11 @@ pub fn assemble(preset: &Preset, slug: &str, view: Option<&DeviceView<'_>>) -> A
     }
 
     let mut stages: Vec<Box<dyn Stage>> = Vec::new();
+    // Gesture slots are handed out in the order the stages will run, which is also the order
+    // the daemon walks the preset in when it resolves their bindings. The two agree because
+    // the sort above is stable and `scroll` is neither pinned first nor last, so no reorder can
+    // change how scroll instances sit relative to each other.
+    let mut gesture_slot = 0usize;
 
     for entry in ordered {
         // The override key uses the instance id when present, so two instances of one
@@ -83,7 +88,19 @@ pub fn assemble(preset: &Preset, slug: &str, view: Option<&DeviceView<'_>>) -> A
             ))),
             "average" => Some(Box::new(build_average(&mut p))),
             "snap" => Some(Box::new(build_snap(&mut p))),
-            "scroll" => Some(Box::new(build_scroll(&mut p))),
+            "scroll" => {
+                let mut scroll = build_scroll(&mut p);
+                if gesture_slot >= stabmouse_core::MAX_GESTURES {
+                    warnings.push(format!(
+                        "preset '{slug}': more than {} bound gesture stages; the extras share \
+                         the last binding rather than being dropped",
+                        stabmouse_core::MAX_GESTURES
+                    ));
+                }
+                scroll.slot = gesture_slot.min(stabmouse_core::MAX_GESTURES - 1);
+                gesture_slot += 1;
+                Some(Box::new(scroll))
+            }
             "pressure" => Some(Box::new(build_pressure(&mut p))),
             other => {
                 if PLANNED.contains(&other) {
@@ -511,6 +528,19 @@ mod tests {
             "{:?}",
             a.warnings
         );
+    }
+
+    #[test]
+    fn each_scroll_stage_gets_its_own_gesture_slot() {
+        // A preset may pair a wheel gesture with a drag one, and each must answer to its own
+        // binding. Sharing a slot is what made holding the wheel's modifier start the drag.
+        let toml = "[[stage]]\ntype = \"scroll\"\nmode = \"wheel\"\nbutton = \"KEY_LEFTALT\"\n\
+                    [[stage]]\ntype = \"scroll\"\nmode = \"drag\"\n\
+                    button = \"KEY_LEFTALT+BTN_MIDDLE\"\n";
+        let preset: Preset = toml::from_str(toml).unwrap();
+        let a = assemble(&preset, "t", None);
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
+        assert_eq!(a.pipeline.len(), 2);
     }
 
     #[test]
