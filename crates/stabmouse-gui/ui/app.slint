@@ -479,6 +479,16 @@ component ParamControl inherits Rectangle {
     // Holding the value here means the drag is smooth and the model is free to arrive late.
     property <float> live: root.param.value;
 
+    // **Typing into a TextInput removes its `text` binding for good.**
+    //
+    // So a field that had been edited once never followed the slider again — it kept whatever
+    // was last typed while the handle moved beside it. The text is therefore *pushed* on every
+    // change of `live` rather than bound to it. Safe while typing, because `live` does not
+    // move until the edit is committed.
+    changed live => {
+        input.text = round(root.live * root.param.round-factor) / root.param.round-factor;
+    }
+
     VerticalLayout {
         spacing: 2px;
         HorizontalLayout {
@@ -527,10 +537,9 @@ component ParamControl inherits Rectangle {
                     padding-right: 8px;
                     spacing: 2px;
                     input := TextInput {
-                        // Follows the live value at the parameter's own precision, so a
-                        // resolution still reads `1600` while being dragged rather than
-                        // `1600.000`.
-                        text: round(root.live * root.param.round-factor)
+                        // Seeded once, then kept in step by the `changed live` handler above —
+                        // a binding here would be destroyed by the first keystroke.
+                        text: round(root.param.value * root.param.round-factor)
                               / root.param.round-factor;
                         font-size: Theme.size-base;
                         font-family: "monospace";
