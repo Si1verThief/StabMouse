@@ -195,6 +195,7 @@ fn build_scroll(p: &mut Params) -> Scroll {
     // silently swallowing motion the moment a button is pressed.
     let mode = match p.str("mode", "drag").as_str() {
         "drag" => ScrollMode::Drag,
+        "wheel" => ScrollMode::Wheel,
         "joystick" => ScrollMode::Joystick,
         other => {
             p.warn(format!("unknown scroll mode '{other}'; using drag"));
@@ -213,11 +214,8 @@ fn build_scroll(p: &mut Params) -> Scroll {
     scroll.freeze_cursor = p.bool("freeze_cursor", scroll.freeze_cursor);
     scroll.full_release_stops_momentum =
         p.bool("full_release_stops_momentum", scroll.full_release_stops_momentum);
-    scroll.take_wheel = p.bool("take_wheel", scroll.take_wheel);
     scroll.wheel_gain = p.f64("wheel_gain", scroll.wheel_gain);
-    // Resolved by the daemon — turning names into codes is platform work, and deciding what
-    // reaches a sink is not a filter's business.
-    let _ = p.str("wheel_modifier", "");
+    // Resolved by the daemon — deciding what reaches a sink is not a filter's business.
     let _ = p.str("mouse_passthrough", "");
     scroll.momentum = p.bool("momentum", scroll.momentum);
     scroll.momentum_decay_s = p.f64("momentum_decay_ms", scroll.momentum_decay_s * 1000.0) / 1000.0;

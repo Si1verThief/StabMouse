@@ -59,6 +59,12 @@ pub struct ParamSpec {
     /// settings under `mode`, the curve settings under `curve_type`. An editor may fold these
     /// away; nothing depends on it doing so.
     pub depends_on: Option<(&'static str, &'static str)>,
+    /// The inverse of `depends_on`: hidden when the named parameter *does* hold this value.
+    ///
+    /// Some settings are relevant to most modes and irrelevant to one. Listing the modes that
+    /// do want them means editing every entry each time a mode is added; naming the one that
+    /// does not is both shorter and less likely to go stale.
+    pub hidden_when: Option<(&'static str, &'static str)>,
     /// Parameters that only mean anything when the named binding holds a *chord*.
     ///
     /// A halfway state needs more than one part to be halfway through; with a single button
@@ -96,12 +102,18 @@ const fn f(
         help,
         kind: ParamKind::Float { default, soft_min, soft_max, decimals },
         depends_on: None,
+        hidden_when: None,
         needs_chord: None,
     }
 }
 
 const fn when(spec: ParamSpec, param: &'static str, value: &'static str) -> ParamSpec {
     ParamSpec { depends_on: Some((param, value)), ..spec }
+}
+
+/// Shown everywhere except when `param` holds `value`.
+const fn not_when(spec: ParamSpec, param: &'static str, value: &'static str) -> ParamSpec {
+    ParamSpec { hidden_when: Some((param, value)), ..spec }
 }
 
 /// Only meaningful when `binding` holds a chord rather than a single button.
@@ -117,6 +129,7 @@ const fn b(key: &'static str, label: &'static str, default: bool, help: &'static
         help,
         kind: ParamKind::Bool { default },
         depends_on: None,
+        hidden_when: None,
         needs_chord: None,
     }
 }
@@ -135,6 +148,7 @@ const fn c(
         help,
         kind: ParamKind::Choice { default, options },
         depends_on: None,
+        hidden_when: None,
         needs_chord: None,
     }
 }
@@ -147,6 +161,7 @@ const fn bind(key: &'static str, label: &'static str, help: &'static str) -> Par
         help,
         kind: ParamKind::Binding,
         depends_on: None,
+        hidden_when: None,
         needs_chord: None,
     }
 }
@@ -414,11 +429,19 @@ pub const STAGES: &[StageSpec] = &[
                 "mode",
                 "Mode",
                 "drag",
-                &["drag", "joystick"],
-                "Drag scrolls by how far you move. Joystick sets a speed from how far you \
-                 hold away from where you pressed, and keeps scrolling while you hold still.",
+                &["drag", "wheel", "joystick"],
+                "Drag scrolls by how far you move. Wheel routes your own wheel through this \
+                 stage so it picks up the speed and momentum set here. Joystick sets a speed \
+                 from how far you hold away from where you pressed, and keeps scrolling while \
+                 you hold still.",
             ),
-            bind("button", "Button", "What engages the gesture. BTN_MIDDLE is the familiar one."),
+            bind(
+                "button",
+                "Button",
+                "What engages the gesture. BTN_MIDDLE is the familiar one — and in wheel \
+                 mode, leaving it unbound means the wheel is always routed through the stage \
+                 rather than only while something is held.",
+            ),
             c(
                 "mouse_passthrough",
                 "Bound mouse button still",
@@ -430,18 +453,19 @@ pub const STAGES: &[StageSpec] = &[
                  alt+middle a plain middle click still pastes. `always` never takes it; \
                  `reserved` always does.",
             ),
-            bind(
-                "wheel_modifier",
-                "Wheel through this stage while held",
-                "Hold this and your own wheel is routed through the stage, picking up its \
-                 speed and momentum. Unclaimed wheel movement is never touched.",
-            ),
-            b(
-                "take_wheel",
-                "Take the wheel",
-                false,
-                "Required for the wheel binding to do anything — off, the wheel is never \
-                 touched no matter what is held.",
+            when(
+                f(
+                    "wheel_gain",
+                    "Wheel multiplier",
+                    "×",
+                    1.0,
+                    0.1,
+                    5.0,
+                    2,
+                    "Output notches per notch of your wheel.",
+                ),
+                "mode",
+                "wheel",
             ),
             when(
                 f(
@@ -494,15 +518,19 @@ pub const STAGES: &[StageSpec] = &[
                 false,
                 "Click to start and click to stop, rather than holding throughout.",
             ),
-            b(
+            not_when(
+                b(
                 "freeze_cursor",
                 "Hold the cursor still",
                 true,
                 "On, a swipe: the cursor stays where it is, as a finger on glass has none to \
                  move. Off, a hand tool: the page follows the pointer so the point under it \
                  stays under it. Joystick ignores this — it needs the cursor to steer by.",
+                ),
+                "mode",
+                "wheel",
             ),
-            when(
+            not_when(
                 b(
                     "momentum",
                     "Momentum",
@@ -511,9 +539,9 @@ pub const STAGES: &[StageSpec] = &[
                      surface with weight rather than a crank.",
                 ),
                 "mode",
-                "drag",
+                "joystick",
             ),
-            when(
+            not_when(
                 f(
                     "momentum_decay_ms",
                     "Momentum decay",
@@ -525,7 +553,7 @@ pub const STAGES: &[StageSpec] = &[
                     "How long a flick takes to fade to about a third of its release speed.",
                 ),
                 "mode",
-                "drag",
+                "joystick",
             ),
             when_chord(
                 b(

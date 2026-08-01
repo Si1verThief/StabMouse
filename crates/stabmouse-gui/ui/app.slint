@@ -653,6 +653,7 @@ export component App inherits Window {
     callback key-up(string);
     callback cancel-listen();
     callback remove-binding(int, string, string);
+    callback forget-param(int, string);
     callback switch-profile(string);
     callback make-startup-profile(string);
 
@@ -1138,9 +1139,10 @@ export component App inherits Window {
                                         }
                                         Rectangle { width: 12px; }
                                         Text {
-                                            text: pr.label;
+                                            text: pr.kind == "legacy"
+                                                ? pr.label + "  (no longer used)" : pr.label;
                                             font-size: Theme.size-base;
-                                            color: Theme.text;
+                                            color: pr.kind == "legacy" ? Theme.muted : Theme.text;
                                             vertical-alignment: center;
                                         }
                                         Rectangle { width: Theme.gap; }
@@ -1160,6 +1162,21 @@ export component App inherits Window {
                                             options: pr.options;
                                             chosen: pr.choice;
                                             picked(v) => { set-param-text(pr.stage-index, pr.key, v); }
+                                        }
+                                        // A key this build no longer reads. Shown so the
+                                        // editor never implies the preset is simpler than it
+                                        // is, with a way to be rid of it.
+                                        if pr.kind == "legacy": Text {
+                                            text: pr.choice;
+                                            font-family: "monospace";
+                                            font-size: Theme.size-muted;
+                                            color: Theme.muted;
+                                            vertical-alignment: center;
+                                        }
+                                        if pr.kind == "legacy": Button {
+                                            label: "Remove";
+                                            danger: true;
+                                            clicked => { forget-param(pr.stage-index, pr.key); }
                                         }
                                         if pr.kind == "binding": BindingControl {
                                             bound: pr.options;

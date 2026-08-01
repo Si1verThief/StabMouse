@@ -288,13 +288,11 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 
 | Param | Type | Notes |
 |---|---|---|
-| `mode` | enum | `drag` (default) · `joystick` |
+| `mode` | enum | `drag` (default) · `wheel` · `joystick` |
 | `freeze_cursor` | bool | Swipe (true) versus hand tool (false). Every mode honours it |
 | `full_release_stops_momentum` | bool | Chord bindings only — see below |
 | `mouse_passthrough` | enum | `always` · `unless_active` (default) · `reserved` |
-| `wheel_modifier` | binding | Hold to route your own wheel through this stage |
-| `take_wheel` | bool | Required for `wheel_modifier` to do anything |
-| `wheel_gain` | f64 | Output notches per wheel notch while taken |
+| `wheel_gain` | f64 | `wheel` mode: output notches per wheel notch |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
 | `speed` | f64 | Notches per millimetre of hand travel. Higher is faster |
@@ -321,10 +319,13 @@ does not emit them, and a setting implying otherwise would claim control over a 
 project refuses to grab. The pen button is never taken either, since a preset that bound it
 would silently lose the ability to draw.
 
-### The wheel goes through the pipeline, and comes out again untouched
+- **`wheel`** — your own wheel, routed through the stage so it picks up the speed and
+  momentum set here. With a binding, only while it is held: `alt+wheel` coasts and a plain
+  wheel does not. With none, always — a wheel that always has momentum is a reasonable
+  thing to want, and a mode chosen deliberately should not need a second thing chosen
+  before it acts.
 
-`wheel_modifier` hands your own wheel to this stage while it is held, so an existing wheel
-picks up the stage's speed and momentum — hold it, flick, and the page carries on.
+### The wheel goes through the pipeline, and comes out again untouched
 
 **Unclaimed wheel movement is never altered.** It enters the pipeline, no stage takes it,
 and the daemon emits exactly what came back — including horizontal wheel, hi-res, and any

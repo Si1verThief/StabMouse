@@ -554,12 +554,7 @@ fn run(
     let keyboard_codes: Vec<u16> = modes
         .slots()
         .iter()
-        .flat_map(|m| {
-            m.modifier
-                .iter()
-                .chain(m.scroll_button.iter())
-                .chain(m.wheel_binding.iter())
-        })
+        .flat_map(|m| m.modifier.iter().chain(m.scroll_button.iter()))
         .flatten()
         .copied()
         .filter(|c| !stabmouse_input::is_mouse_button(*c))
@@ -766,7 +761,6 @@ fn build_modes(
             pipeline: stabmouse_core::Pipeline::new(vec![]),
             modifier: Vec::new(),
             scroll_button: Vec::new(),
-            wheel_binding: Vec::new(),
             passthrough: Default::default(),
         }];
     };
@@ -791,8 +785,7 @@ fn build_modes(
                 pipeline: stabmouse_core::Pipeline::new(vec![]),
                 modifier: Vec::new(),
                 scroll_button: Vec::new(),
-                wheel_binding: Vec::new(),
-                passthrough: Default::default(),
+                    passthrough: Default::default(),
             });
             continue;
         };
@@ -818,7 +811,6 @@ fn build_modes(
             pipeline: assembly.pipeline,
             modifier: stage_bindings(preset, &m.preset, "snap", "modifier"),
             scroll_button: stage_bindings(preset, &m.preset, "scroll", "button"),
-            wheel_binding: stage_bindings(preset, &m.preset, "scroll", "wheel_modifier"),
             passthrough: stage_passthrough(preset),
         });
     }

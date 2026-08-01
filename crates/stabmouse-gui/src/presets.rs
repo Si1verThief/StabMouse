@@ -300,6 +300,14 @@ fn write_binding(path: &Path, stage_index: usize, key: &str, names: &[String]) -
     Ok(())
 }
 
+/// Drop a parameter from a stage entirely.
+pub fn clear_param(path: &Path, stage_index: usize, key: &str) -> anyhow::Result<()> {
+    let mut doc: Document<Preset> = Document::load(path)?;
+    doc.clear_stage_param(stage_index, key)?;
+    doc.save_if_dirty()?;
+    Ok(())
+}
+
 /// Set a parameter that is not a number — a choice, a switch, a binding.
 pub fn write_param_text(
     path: &Path,

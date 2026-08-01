@@ -1292,10 +1292,10 @@ impl Runtime {
         let constrain = self.constrain_held();
         let scrolling = self.scroll_held();
         let scroll_partial = self.scroll_partly_held();
-        let wheel_claimed = self
+        let scroll_bound = self
             .modes
             .current()
-            .is_some_and(|m| !m.wheel_binding.is_empty() && self.any_held(&m.wheel_binding));
+            .is_some_and(|m| !m.scroll_button.is_empty());
 
         let Some(mode) = self.modes.current_mut() else {
             return Ok(());
@@ -1328,7 +1328,7 @@ impl Runtime {
                 sample.wheel_h += v / HI_RES_PER_NOTCH;
             }
         }
-        sample.wheel_claimed = wheel_claimed;
+        sample.scroll_bound = scroll_bound;
         let wheel_in = (sample.wheel_v, sample.wheel_h);
         mode.pipeline.process(&mut sample);
 

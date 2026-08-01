@@ -263,6 +263,11 @@ fn apply_presets(app: &App, selected: usize) {
                             continue;
                         }
                     }
+                    if let Some((on, unwanted)) = p.hidden_when {
+                        if value_of(on).as_deref() == Some(unwanted) {
+                            continue;
+                        }
+                    }
                     // A halfway state needs more than one part to be halfway through, so a
                     // setting that depends on one is offered only where it can act.
                     if let Some(binding) = p.needs_chord {
@@ -346,12 +351,17 @@ fn apply_presets(app: &App, selected: usize) {
                 if seen.contains(&param.key.as_str()) {
                     continue;
                 }
+                // **Read-only, with a way to be rid of it.** These were rendered as binding
+                // controls, which put an inert "Bind…" button under names like
+                // `drag_mm_per_unit` — a control that could not do anything, on a setting
+                // nothing reads. Saying what it is and offering to remove it is the honest
+                // treatment of a key this build has outlived.
                 out.push(EditorRow {
                     stage_index: index as i32,
                     stage_kind: stage.kind.clone().into(),
                     key: param.key.clone().into(),
                     label: presets::humanise(&param.key).into(),
-                    kind: "binding".into(),
+                    kind: "legacy".into(),
                     choice: param.text.clone().into(),
                     ..Default::default()
                 });
@@ -963,6 +973,21 @@ fn main() -> Result<(), slint::PlatformError> {
             *chord_for_cancel.borrow_mut() = KeyChord::default();
             let _ = Client::connect().and_then(|c| c.cancel_binding_capture());
         }
+    });
+
+    let weak = app.as_weak();
+    let hist = history.clone();
+    app.on_forget_param(move |stage_index, key| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "remove setting");
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::clear_param(&path, stage_index.max(0) as usize, key.as_str()),
+            apply_presets(&app, selected)
+        );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();

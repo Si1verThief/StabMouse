@@ -13,6 +13,12 @@ pub enum Mode {
     /// difference between them turned out to be the one flag, and a mode that is a synonym
     /// for a setting is a mode nobody can predict.
     Drag,
+    /// Your own wheel, routed through this stage so it picks up speed and momentum.
+    ///
+    /// With a binding, only while it is held — `alt+wheel` coasts and a plain wheel does
+    /// not. With none, always: a wheel that always has momentum is a reasonable thing to
+    /// want, and a mode chosen deliberately should not need a second thing chosen to act.
+    Wheel,
     /// Middle-click autoscroll: displacement from where the button went down sets a scroll
     /// *velocity*, so a small sustained offset scrolls without more hand travel.
     Joystick,
@@ -76,14 +82,7 @@ pub struct Scroll {
     pub momentum: bool,
     /// Seconds for a flick to decay to about a third of its release speed.
     pub momentum_decay_s: f64,
-    /// Take the physical wheel through this stage while its binding is held.
-    ///
-    /// The point is momentum on a wheel you already own: hold the binding, flick the wheel,
-    /// and the page carries on. Unclaimed wheel movement is never touched — it leaves exactly
-    /// as it arrived, because a feature that could silently eat scrolling would not be worth
-    /// having.
-    pub take_wheel: bool,
-    /// Notches of output per notch of wheel, while the wheel is being taken.
+    /// Notches of output per notch of wheel, in `wheel` mode.
     pub wheel_gain: f64,
     /// With a chord binding, letting go of *everything* ends the glide.
     ///
@@ -139,7 +138,6 @@ impl Scroll {
             // A flick that dies in a third of a second reads as a surface with weight rather
             // than as one that keeps going after the hand has moved on.
             momentum_decay_s: 0.35,
-            take_wheel: false,
             wheel_gain: 1.0,
             full_release_stops_momentum: false,
             offset_x: 0.0,
@@ -236,10 +234,11 @@ impl Stage for Scroll {
         let sign = if self.invert { -1.0 } else { 1.0 };
         let active = self.engaged(s.scrolling);
 
-        // The wheel, when its binding says so. Taken *and cleared*, so the daemon does not
-        // also pass the original through and double it; left alone otherwise, so a wheel
-        // nothing claims behaves exactly as it always did.
-        if self.take_wheel && s.wheel_claimed && (s.wheel_v != 0.0 || s.wheel_h != 0.0) {
+        // The wheel, in the mode that asks for it. Taken *and cleared*, so the daemon does
+        // not also pass the original through and double it; left alone in every other mode,
+        // so a wheel this stage is not interested in behaves exactly as it always did.
+        let takes_wheel = self.mode == Mode::Wheel && (!s.scroll_bound || active);
+        if takes_wheel && (s.wheel_v != 0.0 || s.wheel_h != 0.0) {
             let gain = if self.wheel_gain.is_finite() && self.wheel_gain > 0.0 {
                 self.wheel_gain
             } else {
@@ -259,6 +258,12 @@ impl Stage for Scroll {
             }
         }
 
+        if !active && self.mode == Mode::Wheel {
+            // A wheel mode with no binding is always listening, so it must reach the wheel
+            // handling above rather than returning here with the gesture "inactive".
+            self.glide(s, dt);
+            return;
+        }
         if !active {
             // Letting go of the whole chord is a brake. Checked before the glide runs, so a
             // full release stops the page on the same sample rather than a frame later.
@@ -298,6 +303,8 @@ impl Stage for Scroll {
         let mut produced_y = 0.0;
 
         match self.mode {
+            // The wheel is the whole input; there is no hand movement to divert.
+            Mode::Wheel => {}
             Mode::Drag => {
                 let speed = if self.speed.is_finite() && self.speed > 0.0 {
                     self.speed
@@ -627,34 +634,32 @@ mod tests {
         assert!(stage.glide_x == 0.0 && stage.glide_y == 0.0);
     }
 
-    #[test]
-    fn an_unclaimed_wheel_passes_through_untouched() {
-        // The guarantee that makes routing the wheel through the pipeline safe at all: a
-        // stage that is not taking it must leave it exactly as it arrived, on every axis.
-        for take in [false, true] {
-            let mut stage = Scroll::new(Mode::Drag);
-            stage.take_wheel = take;
-            let mut s = Sample::new(0.0, 0.0, 1000, false);
-            s.dt = 0.001;
-            s.wheel_v = 3.0;
-            s.wheel_h = -2.0;
-            // Never claimed, so `take_wheel` alone must change nothing.
-            s.wheel_claimed = false;
-            stage.process(&mut s);
-            assert_eq!((s.wheel_v, s.wheel_h), (3.0, -2.0), "take_wheel = {take}");
-            assert_eq!((s.scroll_x, s.scroll_y), (0.0, 0.0));
-        }
-    }
-
-    #[test]
-    fn a_claimed_wheel_is_taken_on_both_axes() {
-        let mut stage = Scroll::new(Mode::Drag);
-        stage.take_wheel = true;
+    fn wheel_sample(bound: bool, held: bool) -> Sample {
         let mut s = Sample::new(0.0, 0.0, 1000, false);
         s.dt = 0.001;
         s.wheel_v = 3.0;
         s.wheel_h = -2.0;
-        s.wheel_claimed = true;
+        s.scroll_bound = bound;
+        s.scrolling = held;
+        s
+    }
+
+    #[test]
+    fn a_mode_that_is_not_wheel_never_touches_the_wheel() {
+        // The guarantee that makes routing the wheel through the pipeline safe at all: a
+        // stage not interested in it must leave it exactly as it arrived, on every axis.
+        for mode in [Mode::Drag, Mode::Joystick] {
+            let mut stage = Scroll::new(mode);
+            let mut s = wheel_sample(false, true);
+            stage.process(&mut s);
+            assert_eq!((s.wheel_v, s.wheel_h), (3.0, -2.0), "{mode:?} took the wheel");
+        }
+    }
+
+    #[test]
+    fn wheel_mode_takes_both_axes_and_clears_them() {
+        let mut stage = Scroll::new(Mode::Wheel);
+        let mut s = wheel_sample(false, false);
         stage.process(&mut s);
         assert_eq!((s.wheel_v, s.wheel_h), (0.0, 0.0), "taken means cleared, or it doubles");
         assert_eq!(s.scroll_y, 3.0);
@@ -662,8 +667,21 @@ mod tests {
     }
 
     #[test]
+    fn a_bound_wheel_mode_waits_for_its_binding() {
+        // `alt+wheel` must leave a plain wheel alone, which is the whole reason to bind it.
+        let mut stage = Scroll::new(Mode::Wheel);
+        let mut idle = wheel_sample(true, false);
+        stage.process(&mut idle);
+        assert_eq!((idle.wheel_v, idle.wheel_h), (3.0, -2.0), "unheld must pass through");
+
+        let mut held = wheel_sample(true, true);
+        stage.process(&mut held);
+        assert_eq!((held.wheel_v, held.wheel_h), (0.0, 0.0), "held must take it");
+    }
+
+    #[test]
     fn nothing_panics_on_pathological_input() {
-        for mode in [Mode::Drag, Mode::Joystick] {
+        for mode in [Mode::Drag, Mode::Wheel, Mode::Joystick] {
             let mut stage = Scroll::new(mode);
             stage.speed = f64::NAN;
             stage.gain = f64::INFINITY;
