@@ -83,6 +83,11 @@ pub fn create(name: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Where a profile with this name would live, so an undo can be recorded before it exists.
+pub fn profile_path(name: &str) -> PathBuf {
+    profiles_dir().join(format!("{}.toml", slugify(name)))
+}
+
 pub fn delete(path: &Path) -> anyhow::Result<()> {
     std::fs::remove_file(path)?;
     Ok(())

@@ -11,6 +11,7 @@
 //! the user may never see — this is the frontend for people who are not in a terminal.
 
 mod desktop;
+mod history;
 mod presets;
 mod profiles;
 
@@ -18,6 +19,7 @@ slint::include_modules!();
 
 use slint::{ModelRc, SharedString, VecModel};
 use stabmouse_ipc::client::Client;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Everything the dashboard shows, gathered in one place.
@@ -413,6 +415,19 @@ fn main() -> Result<(), slint::PlatformError> {
             .collect::<Vec<_>>(),
     ))));
 
+    // One undo stack for the window, shared by every action that touches a file.
+    let history: Rc<RefCell<history::History>> = Rc::new(RefCell::new(history::History::default()));
+
+    /// Snapshot a file before changing it, so the change can be taken back.
+    fn remember(history: &Rc<RefCell<history::History>>, path: &std::path::Path, what: &str) {
+        history.borrow_mut().record(path, what);
+    }
+
+    fn show_undo(app: &App, history: &Rc<RefCell<history::History>>) {
+        let label = history.borrow().next_label().unwrap_or_default().to_string();
+        app.set_undo_label(label.into());
+    }
+
     // Every editor action ends the same way: do it, then re-read from disk. Re-reading rather
     // than patching the model in place is what keeps the window showing the file's truth —
     // including any rounding the format-preserving editor applied, and any edit made in a
@@ -435,8 +450,15 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_create_preset(move |name| {
         let Some(app) = weak.upgrade() else { return };
+        // Recorded before it exists, so undo knows to remove it again.
+        remember(
+            &hist,
+            &presets::preset_path(name.as_str()),
+            "create preset",
+        );
         match presets::create_preset(name.as_str()) {
             Ok(_) => {
                 app.set_notice(Default::default());
@@ -451,9 +473,11 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             Err(e) => notice(&app, e),
         }
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_delete_preset(move || {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
@@ -470,72 +494,93 @@ fn main() -> Result<(), slint::PlatformError> {
             );
             return;
         }
+        // Recorded with the file's whole contents, so undo brings it back rather than
+        // leaving the user with a name and no pipeline.
+        remember(&hist, &path, "delete preset");
         after!(app, presets::delete_preset(&path), apply_presets(&app, 0));
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_add_stage(move |kind| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else {
             notice(&app, "create a preset first");
             return;
         };
+        remember(&hist, &path, "add stage");
         let selected = app.get_selected_preset().max(0) as usize;
         after!(app, presets::add_stage(&path, kind.as_str()), apply_presets(&app, selected));
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_remove_stage(move |index| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "remove stage");
         let selected = app.get_selected_preset().max(0) as usize;
         after!(
             app,
             presets::remove_stage(&path, index.max(0) as usize),
             apply_presets(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_move_stage(move |index, delta| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "reorder stage");
         let selected = app.get_selected_preset().max(0) as usize;
         after!(
             app,
             presets::move_stage(&path, index.max(0) as usize, delta),
             apply_presets(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_set_stage_enabled(move |index, enabled| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "toggle stage");
         let selected = app.get_selected_preset().max(0) as usize;
         after!(
             app,
             presets::write_stage_enabled(&path, index.max(0) as usize, enabled),
             apply_presets(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_set_param_float(move |index, key, value| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "change value");
         let selected = app.get_selected_preset().max(0) as usize;
         after!(
             app,
             presets::write_param(&path, index.max(0) as usize, key.as_str(), f64::from(value)),
             apply_presets(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_set_param_bool(move |index, key, value| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "change setting");
         let selected = app.get_selected_preset().max(0) as usize;
         after!(
             app,
@@ -547,12 +592,15 @@ fn main() -> Result<(), slint::PlatformError> {
             ),
             apply_presets(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_set_param_text(move |index, key, value| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_preset_path(&app) else { return };
+        remember(&hist, &path, "change setting");
         let selected = app.get_selected_preset().max(0) as usize;
         after!(
             app,
@@ -564,6 +612,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ),
             apply_presets(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     // ---------------------------------------------------------------- profiles
@@ -576,8 +625,10 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_create_profile(move |name| {
         let Some(app) = weak.upgrade() else { return };
+        remember(&hist, &profiles::profile_path(name.as_str()), "create profile");
         match profiles::create(name.as_str()) {
             Ok(_) => {
                 app.set_notice(Default::default());
@@ -590,22 +641,28 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             Err(e) => notice(&app, e),
         }
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_delete_profile(move || {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_profile_path(&app) else { return };
+        remember(&hist, &path, "delete profile");
         after!(app, profiles::delete(&path), apply_profiles(&app, 0));
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_add_slot(move || {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_profile_path(&app) else {
             notice(&app, "create a profile first");
             return;
         };
+        remember(&hist, &path, "add slot");
         // Points at whatever preset exists, so a new slot is valid the moment it appears
         // rather than referring to a name that is not there.
         let preset = presets::load_all()
@@ -618,54 +675,82 @@ fn main() -> Result<(), slint::PlatformError> {
             profiles::add_mode(&path, "New mode", "mouse", &preset),
             apply_profiles(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_remove_slot(move |index| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_profile_path(&app) else { return };
+        remember(&hist, &path, "remove slot");
         let selected = app.get_selected_profile().max(0) as usize;
         after!(
             app,
             profiles::remove_mode(&path, index.max(0) as usize),
             apply_profiles(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_move_slot(move |index, delta| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_profile_path(&app) else { return };
+        remember(&hist, &path, "reorder slot");
         let selected = app.get_selected_profile().max(0) as usize;
         after!(
             app,
             profiles::move_mode(&path, index.max(0) as usize, delta),
             apply_profiles(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_set_slot_field(move |index, field, value| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_profile_path(&app) else { return };
+        remember(&hist, &path, "change slot");
         let selected = app.get_selected_profile().max(0) as usize;
         after!(
             app,
             profiles::set_mode_field(&path, index.max(0) as usize, field.as_str(), value.as_str()),
             apply_profiles(&app, selected)
         );
+        show_undo(&app, &hist);
     });
 
     let weak = app.as_weak();
+    let hist = history.clone();
     app.on_set_default_slot(move |index| {
         let Some(app) = weak.upgrade() else { return };
         let Some(path) = selected_profile_path(&app) else { return };
+        remember(&hist, &path, "set default slot");
         let selected = app.get_selected_profile().max(0) as usize;
         after!(
             app,
             profiles::set_default_mode(&path, index.max(0) as usize + 1),
             apply_profiles(&app, selected)
         );
+        show_undo(&app, &hist);
+    });
+
+    let weak = app.as_weak();
+    let hist = history.clone();
+    app.on_undo(move || {
+        let Some(app) = weak.upgrade() else { return };
+        match hist.borrow_mut().undo() {
+            Ok(what) => app.set_notice(format!("undid: {what}").into()),
+            Err(e) => notice(&app, e),
+        }
+        // Both editors re-read: an undo may have restored a preset a profile refers to, or a
+        // profile whose slots name presets, and showing one stale would be its own bug.
+        apply_presets(&app, app.get_selected_preset().max(0) as usize);
+        apply_profiles(&app, app.get_selected_profile().max(0) as usize);
+        show_undo(&app, &hist);
     });
 
     app.run()

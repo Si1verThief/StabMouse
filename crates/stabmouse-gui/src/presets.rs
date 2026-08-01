@@ -129,6 +129,11 @@ pub fn create_preset(name: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Where a preset with this name would live, so an undo can be recorded before it exists.
+pub fn preset_path(name: &str) -> PathBuf {
+    presets_dir().join(format!("{}.toml", slugify(name)))
+}
+
 /// Delete a preset file.
 ///
 /// The caller is expected to have warned about profiles that reference it — reference
