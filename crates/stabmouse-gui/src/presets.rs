@@ -19,9 +19,8 @@ use std::path::{Path, PathBuf};
 pub struct Param {
     pub key: String,
     pub value: f64,
-    /// False for anything not expressible as a slider — strings, booleans, tables. Shown
-    /// read-only rather than hidden, so the editor never implies a preset is simpler than it is.
-    pub numeric: bool,
+    /// The value as it reads in the file, whatever its type. The catalog decides which
+    /// control to offer; this is what the file actually says.
     pub text: String,
 }
 
@@ -87,14 +86,12 @@ fn load_one(path: &Path) -> Option<PresetFile> {
                 .params
                 .iter()
                 .map(|(key, value)| {
-                    let numeric = value.as_float().is_some() || value.as_integer().is_some();
                     Param {
                         key: key.clone(),
                         value: value
                             .as_float()
                             .or_else(|| value.as_integer().map(|i| i as f64))
                             .unwrap_or(0.0),
-                        numeric,
                         text: match value {
                             toml::Value::String(s) => s.clone(),
                             other => other.to_string(),
@@ -112,6 +109,126 @@ fn load_one(path: &Path) -> Option<PresetFile> {
         path: path.to_path_buf(),
         stages,
     })
+}
+
+/// A new preset file carrying nothing but its identity.
+///
+/// Deliberately empty of stages: "create blank, then fill" is the workflow, and a new preset
+/// pre-loaded with someone else's idea of a starting pipeline is one the user has to dismantle
+/// before they can build their own.
+pub fn create_preset(name: &str) -> anyhow::Result<PathBuf> {
+    let slug = slugify(name);
+    anyhow::ensure!(!slug.is_empty(), "a preset needs a name");
+    let path = presets_dir().join(format!("{slug}.toml"));
+    anyhow::ensure!(!path.exists(), "a preset called '{slug}' already exists");
+    std::fs::create_dir_all(presets_dir())?;
+    std::fs::write(
+        &path,
+        format!("schema = 1\ndisplay_name = \"{}\"\n", name.replace('"', "'")),
+    )?;
+    Ok(path)
+}
+
+/// Delete a preset file.
+///
+/// The caller is expected to have warned about profiles that reference it — reference
+/// integrity is the config crate's rule (modules.md), and this is the raw operation.
+pub fn delete_preset(path: &Path) -> anyhow::Result<()> {
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Which profiles reference a preset, so deleting it can say what it would break.
+pub fn profiles_using(slug: &str) -> Vec<String> {
+    let dir = config_dir().join("profiles");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        .filter_map(|p| {
+            let doc: Document<stabmouse_config::Profile> = Document::load(&p).ok()?;
+            if !doc.data().modes.iter().any(|m| m.preset == slug) {
+                return None;
+            }
+            Some(p.file_stem()?.to_string_lossy().to_string())
+        })
+        .collect()
+}
+
+/// A readable label for a key the catalog does not describe.
+///
+/// `min_cutoff_hz` becomes "Min cutoff hz" — plainer than the raw key and never a lie about
+/// what the parameter is. Only reachable for keys this build predates; everything catalogued
+/// carries its own written label.
+pub fn humanise(key: &str) -> String {
+    let mut out = key.replace('_', " ");
+    if let Some(first) = out.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    out
+}
+
+/// A filename-safe identity derived from a display name.
+///
+/// Filenames *are* identities in this config (D14), so this decides what a preset is called
+/// forever. Conservative on purpose: anything outside the safe set becomes a hyphen rather
+/// than being dropped, so two different names cannot collapse into one slug silently.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// Add a stage to a preset, with the catalog's defaults already in place.
+pub fn add_stage(path: &Path, kind: &str) -> anyhow::Result<()> {
+    let text = stabmouse_config::catalog::new_stage_toml(kind)
+        .ok_or_else(|| anyhow::anyhow!("no such stage '{kind}'"))?;
+    let mut doc: Document<Preset> = Document::load(path)?;
+    doc.append_stage_text(&text)?;
+    doc.save_if_dirty()?;
+    Ok(())
+}
+
+pub fn remove_stage(path: &Path, index: usize) -> anyhow::Result<()> {
+    let mut doc: Document<Preset> = Document::load(path)?;
+    doc.remove_stage(index)?;
+    doc.save_if_dirty()?;
+    Ok(())
+}
+
+pub fn move_stage(path: &Path, index: usize, delta: i32) -> anyhow::Result<()> {
+    let mut doc: Document<Preset> = Document::load(path)?;
+    doc.move_stage(index, delta)?;
+    doc.save_if_dirty()?;
+    Ok(())
+}
+
+/// Set a parameter that is not a number — a choice, a switch, a binding.
+pub fn write_param_text(
+    path: &Path,
+    stage_index: usize,
+    key: &str,
+    value: toml::Value,
+) -> anyhow::Result<()> {
+    let mut doc: Document<Preset> = Document::load(path)?;
+    doc.set_stage_param(stage_index, key, value)?;
+    doc.save_if_dirty()?;
+    Ok(())
 }
 
 /// Write one parameter back, preserving everything around it.
@@ -198,7 +315,13 @@ catch_up = 0.35
             .find(|p| p.key == "radius_mm")
             .unwrap();
         assert!((radius.value - 0.4).abs() < 1e-9);
-        assert!(radius.numeric);
+    }
+
+    #[test]
+    fn an_uncatalogued_key_still_gets_a_readable_label() {
+        // Reachable only for a key this build predates — but that key must still be legible
+        // rather than raw, and must never be hidden.
+        assert_eq!(humanise("warp_factor_mm"), "Warp factor mm");
     }
 
     #[test]
@@ -211,7 +334,6 @@ catch_up = 0.35
             .iter()
             .find(|p| p.key == "source")
             .unwrap();
-        assert!(!source.numeric);
         assert_eq!(source.text, "cursor");
     }
 

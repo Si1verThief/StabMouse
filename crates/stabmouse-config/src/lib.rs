@@ -9,6 +9,7 @@
 //!   `inking`; there is no internal name field to disagree with it. See D14.
 
 mod assemble;
+pub mod catalog;
 mod cascade;
 mod edit;
 mod error;
@@ -16,6 +17,7 @@ mod schema;
 mod store;
 
 pub use assemble::{assemble, Assembly};
+pub use catalog::{ParamKind, ParamSpec, StageSpec, STAGES};
 pub use cascade::{DeviceView, Origin, OverrideKey, Resolved};
 pub use edit::Document;
 pub use store::{LoadReport, Store, RAW};

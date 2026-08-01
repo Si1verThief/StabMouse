@@ -160,18 +160,16 @@ fn build_snap(p: &mut Params) -> Snap {
     // lock. Narrowing it turns the constraint into a magnet that only bites near an axis,
     // which is the soft behaviour the parameter exists to offer.
     let default_tolerance = 180.0 / f64::from(divisions.max(1));
+    // Read unconditionally: a `line` constraint that still carries an angle tolerance is a
+    // file mid-experiment, not a file with an unknown key in it.
+    let tolerance_deg = p.f64("tolerance_deg", default_tolerance);
+    let angle = Constraint::Angle { divisions, tolerance_deg };
     let constraint = match p.str("constraint", "angle").as_str() {
-        "angle" => Constraint::Angle {
-            divisions,
-            tolerance_deg: p.f64("tolerance_deg", default_tolerance),
-        },
+        "angle" => angle,
         "line" => Constraint::Line,
         other => {
             p.warn(format!("unknown constraint '{other}'; using angle"));
-            Constraint::Angle {
-                divisions,
-                tolerance_deg: p.f64("tolerance_deg", default_tolerance),
-            }
+            angle
         }
     };
 
@@ -221,19 +219,23 @@ fn build_sensitivity(p: &mut Params) -> Sensitivity {
     s.y_ratio = p.f64("y_ratio", 1.0);
     s.max_multiplier = p.opt_f64("max_multiplier");
 
+    // Read before the branch, not inside it. **A parameter that is present but not currently
+    // active is not an unknown parameter** — a file may carry curve settings while the curve
+    // is flat, which is exactly what happens between switching the type and switching it back,
+    // and warning about it would train the user to ignore warnings.
+    let curve = Curve::Power {
+        reference_mm_s: p.f64("curve_reference_mm_s", 50.0),
+        exponent: p.f64("curve_exponent", 1.0),
+        min: p.f64("curve_min", 0.5),
+        max: p.f64("curve_max", 3.0),
+    };
+
     // The curve is nested under this stage rather than being its own: a flat multiplier
     // is the common case and gets the plain name, so that the users who most need it are
     // not deterred by a heading they do not understand. See vocabulary.md.
     match p.str("curve_type", "flat").as_str() {
         "flat" => {}
-        "power" => {
-            s.curve = Curve::Power {
-                reference_mm_s: p.f64("curve_reference_mm_s", 50.0),
-                exponent: p.f64("curve_exponent", 1.0),
-                min: p.f64("curve_min", 0.5),
-                max: p.f64("curve_max", 3.0),
-            };
-        }
+        "power" => s.curve = curve,
         other => p.warn(format!("unknown curve type '{other}'; using flat")),
     }
     s

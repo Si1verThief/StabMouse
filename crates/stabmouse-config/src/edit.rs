@@ -150,6 +150,189 @@ impl<T: DeserializeOwned> Document<T> {
         self.dirty = true;
         self.reparse()
     }
+
+    /// Remove a parameter, so a stage can shed a key it no longer needs.
+    pub fn clear_stage_param(&mut self, index: usize, param: &str) -> Result<()> {
+        let table = self.stage_mut(index)?;
+        table.remove(param);
+        self.dirty = true;
+        self.reparse()
+    }
+
+    /// Append a `[[stage]]` block, written as text so the catalog's own defaults and comments
+    /// arrive intact.
+    ///
+    /// Appending source rather than building tables programmatically keeps one description of
+    /// what a new stage looks like — the catalog's — instead of a second one here that could
+    /// disagree with it.
+    pub fn append_stage_text(&mut self, text: &str) -> Result<()> {
+        let mut source = self.doc.to_string();
+        if !source.ends_with('\n') {
+            source.push('\n');
+        }
+        source.push_str(text);
+        self.doc = source.parse::<toml_edit::DocumentMut>().map_err(|e| Error::Parse {
+            path: self.path.clone(),
+            message: e.to_string(),
+        })?;
+        self.dirty = true;
+        self.reparse()
+    }
+
+    /// Append an `[[name]]` block written as text.
+    ///
+    /// Text rather than constructed tables, so the one description of what a new entry looks
+    /// like stays wherever it already is — the catalog, for stages — instead of being
+    /// duplicated here where it could disagree.
+    pub fn append_table_text(&mut self, _name: &str, text: &str) -> Result<()> {
+        self.append_stage_text(text)
+    }
+
+    /// Remove the nth `[[name]]` block.
+    pub fn remove_table(&mut self, name: &str, index: usize) -> Result<()> {
+        let path = self.path.clone();
+        let tables = self.tables_mut(name)?;
+        if index >= tables.len() {
+            return Err(Error::Parse {
+                path,
+                message: format!("{name} index {index} out of range"),
+            });
+        }
+        tables.remove(index);
+        self.dirty = true;
+        self.reparse()
+    }
+
+    /// Move the nth `[[name]]` block one place, carrying its contents and comments.
+    pub fn move_table(&mut self, name: &str, index: usize, delta: i32) -> Result<()> {
+        let tables = self.tables_mut(name)?;
+        let len = tables.len();
+        let Some(target) = index.checked_add_signed(delta as isize).filter(|t| *t < len) else {
+            return Ok(());
+        };
+        if index >= len || target == index {
+            return Ok(());
+        }
+        let a = tables.get(index).cloned();
+        let b = tables.get(target).cloned();
+        let pos_index = tables.get(index).and_then(|t| t.position());
+        let pos_target = tables.get(target).and_then(|t| t.position());
+        if let (Some(a), Some(b)) = (a, b) {
+            if let Some(slot) = tables.get_mut(index) {
+                *slot = b;
+                if let Some(p) = pos_index {
+                    slot.set_position(p);
+                }
+            }
+            if let Some(slot) = tables.get_mut(target) {
+                *slot = a;
+                if let Some(p) = pos_target {
+                    slot.set_position(p);
+                }
+            }
+        }
+        self.dirty = true;
+        self.reparse()
+    }
+
+    /// Set a field on the nth `[[name]]` block.
+    pub fn set_table_param(
+        &mut self,
+        name: &str,
+        index: usize,
+        param: &str,
+        value: toml::Value,
+    ) -> Result<()> {
+        let path = self.path.clone();
+        let tables = self.tables_mut(name)?;
+        let table = tables.get_mut(index).ok_or(Error::Parse {
+            path,
+            message: format!("{name} index {index} out of range"),
+        })?;
+        assign(table, param, to_edit_value(&value));
+        self.dirty = true;
+        self.reparse()
+    }
+
+    /// Remove the nth stage entirely.
+    pub fn remove_stage(&mut self, index: usize) -> Result<()> {
+        let stages = self.stages_mut()?;
+        if index >= stages.len() {
+            return Err(Error::Parse {
+                path: self.path.clone(),
+                message: format!("stage index {index} out of range"),
+            });
+        }
+        stages.remove(index);
+        self.dirty = true;
+        self.reparse()
+    }
+
+    /// Move a stage one place earlier or later, carrying its parameters and comments with it.
+    ///
+    /// A no-op at either end rather than an error: an editor offering an up arrow on the first
+    /// row is a smaller wrong than one that reports a failure the user cannot act on.
+    pub fn move_stage(&mut self, index: usize, delta: i32) -> Result<()> {
+        let stages = self.stages_mut()?;
+        let len = stages.len();
+        let Some(target) = index.checked_add_signed(delta as isize).filter(|t| *t < len) else {
+            return Ok(());
+        };
+        if index >= len || target == index {
+            return Ok(());
+        }
+        // `toml_edit` has no swap, so the pair is rebuilt from clones. The tables carry their
+        // own decor, so comments travel with the stage rather than staying at the position.
+        //
+        // **A table also carries the position it renders at**, and cloning carries that too —
+        // so a naive swap exchanges the contents *and* their positions and the document comes
+        // out byte-identical. Measured, after exactly that happened. Each slot therefore keeps
+        // the position it already had, and only the contents move.
+        let a = stages.get(index).cloned();
+        let b = stages.get(target).cloned();
+        let pos_index = stages.get(index).and_then(|t| t.position());
+        let pos_target = stages.get(target).and_then(|t| t.position());
+        if let (Some(a), Some(b)) = (a, b) {
+            if let Some(slot) = stages.get_mut(index) {
+                *slot = b;
+                if let Some(p) = pos_index {
+                    slot.set_position(p);
+                }
+            }
+            if let Some(slot) = stages.get_mut(target) {
+                *slot = a;
+                if let Some(p) = pos_target {
+                    slot.set_position(p);
+                }
+            }
+        }
+        self.dirty = true;
+        self.reparse()
+    }
+
+    fn stages_mut(&mut self) -> Result<&mut toml_edit::ArrayOfTables> {
+        self.tables_mut("stage")
+    }
+
+    fn tables_mut(&mut self, name: &str) -> Result<&mut toml_edit::ArrayOfTables> {
+        let path = self.path.clone();
+        self.doc
+            .get_mut(name)
+            .and_then(|i| i.as_array_of_tables_mut())
+            .ok_or(Error::Parse {
+                path,
+                message: format!("no [[{name}]] entries"),
+            })
+    }
+
+    fn stage_mut(&mut self, index: usize) -> Result<&mut toml_edit::Table> {
+        let path = self.path.clone();
+        let stages = self.stages_mut()?;
+        stages.get_mut(index).ok_or(Error::Parse {
+            path,
+            message: format!("stage index {index} out of range"),
+        })
+    }
 }
 
 /// Set `key` to `value` without disturbing any formatting around it.
@@ -196,6 +379,82 @@ fn to_edit_value(v: &toml::Value) -> toml_edit::Value {
             }
             toml_edit::Value::InlineTable(t)
         }
+    }
+}
+
+#[cfg(test)]
+mod stage_ops_tests {
+    use super::*;
+    use crate::schema::Preset;
+
+    const SAMPLE: &str = r#"schema = 1
+
+# A note on the first stage.
+[[stage]]
+type = "normalize"
+dpi = 1600
+
+[[stage]]
+type = "stabilize"
+radius_mm = 0.4
+"#;
+
+    fn doc() -> Document<Preset> {
+        Document::from_str("/tmp/stabmouse-edit-test.toml", SAMPLE).unwrap()
+    }
+
+    #[test]
+    fn a_stage_can_be_appended_from_the_catalogs_own_text() {
+        let mut d = doc();
+        let text = crate::catalog::new_stage_toml("smooth").unwrap();
+        d.append_stage_text(&text).unwrap();
+        assert_eq!(d.data().stages.len(), 3);
+        assert_eq!(d.data().stages[2].kind, "smooth");
+        assert!(d.to_text().contains("# A note on the first stage."));
+    }
+
+    #[test]
+    fn removing_a_stage_leaves_the_others_and_their_comments() {
+        let mut d = doc();
+        d.remove_stage(1).unwrap();
+        assert_eq!(d.data().stages.len(), 1);
+        assert_eq!(d.data().stages[0].kind, "normalize");
+        assert!(d.to_text().contains("# A note on the first stage."));
+    }
+
+    #[test]
+    fn moving_a_stage_carries_its_parameters_with_it() {
+        let mut d = doc();
+        d.move_stage(1, -1).unwrap();
+        assert_eq!(d.data().stages[0].kind, "stabilize");
+        assert_eq!(d.data().stages[1].kind, "normalize");
+        // The values travelled too, rather than the kinds swapping over fixed bodies.
+        assert!(d.data().stages[0].params.contains_key("radius_mm"));
+        assert!(d.data().stages[1].params.contains_key("dpi"));
+    }
+
+    #[test]
+    fn moving_past_either_end_does_nothing_rather_than_failing() {
+        // An editor that offers an up arrow on the first row is a smaller wrong than one that
+        // reports a failure the user cannot act on.
+        let mut d = doc();
+        d.move_stage(0, -1).unwrap();
+        assert_eq!(d.data().stages[0].kind, "normalize");
+        d.move_stage(1, 1).unwrap();
+        assert_eq!(d.data().stages[1].kind, "stabilize");
+    }
+
+    #[test]
+    fn a_parameter_can_be_removed_again() {
+        let mut d = doc();
+        d.clear_stage_param(1, "radius_mm").unwrap();
+        assert!(!d.data().stages[1].params.contains_key("radius_mm"));
+    }
+
+    #[test]
+    fn removing_a_stage_that_is_not_there_is_an_error_not_a_panic() {
+        let mut d = doc();
+        assert!(d.remove_stage(9).is_err());
     }
 }
 

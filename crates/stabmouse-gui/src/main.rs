@@ -11,8 +11,8 @@
 //! the user may never see — this is the frontend for people who are not in a terminal.
 
 mod desktop;
-mod params;
 mod presets;
+mod profiles;
 
 slint::include_modules!();
 
@@ -178,12 +178,14 @@ fn watch_daemon(weak: slint::Weak<App>) {
     });
 }
 
-/// Load every preset and push the selected one's parameters into the window.
+/// Push the preset list and the selected preset's editable rows into the window.
 ///
-/// Re-read from disk on every selection rather than cached: the file is the source of truth,
-/// the daemon reloads from it too, and a cache here would be a second opinion about what the
-/// user's config says.
+/// Rows come from the **catalog** merged with the file, not from the file alone: a stage just
+/// added has no parameters written yet, and an editor that showed only what was already there
+/// could never fill one in. The file supplies values; the catalog supplies what exists.
 fn apply_presets(app: &App, selected: usize) {
+    use stabmouse_config::ParamKind;
+
     let files = presets::load_all();
     let rows: Vec<PresetRow> = files
         .iter()
@@ -194,44 +196,99 @@ fn apply_presets(app: &App, selected: usize) {
         .collect();
 
     let selected = selected.min(files.len().saturating_sub(1));
-    let mut params: Vec<ParamRow> = Vec::new();
+    let mut out: Vec<EditorRow> = Vec::new();
+
     if let Some(file) = files.get(selected) {
+        let count = file.stages.len();
         for (index, stage) in file.stages.iter().enumerate() {
-            for (n, param) in stage.params.iter().enumerate() {
-                let meta = params::meta(&stage.kind, &param.key);
-                let (lo, hi) = params::range_for(&stage.kind, &param.key, param.value);
-                params.push(ParamRow {
-                    stage_index: index as i32,
-                    stage_kind: stage.kind.clone().into(),
-                    stage_enabled: stage.enabled,
-                    first_of_stage: n == 0,
-                    key: param.key.clone().into(),
-                    label: params::label_for(&stage.kind, &param.key).into(),
-                    unit: meta.unit.into(),
-                    help: meta.help.into(),
-                    value: param.value as f32,
-                    minimum: lo as f32,
-                    maximum: hi as f32,
-                    numeric: param.numeric,
-                    text: param.text.clone().into(),
-                    display: format!(
-                        "{:.*}",
-                        meta.decimals.clamp(0, 6) as usize,
-                        param.value
-                    )
-                    .into(),
-                });
+            let spec = stabmouse_config::catalog::stage(&stage.kind);
+            let pinned_first = spec.is_some_and(|s| s.pinned_first);
+            let pinned_last = spec.is_some_and(|s| s.pinned_last);
+
+            out.push(EditorRow {
+                is_header: true,
+                stage_index: index as i32,
+                stage_kind: stage.kind.clone().into(),
+                stage_label: spec.map(|s| s.label).unwrap_or(&stage.kind).into(),
+                stage_enabled: stage.enabled,
+                // The assembler re-pins these however they are ordered, so an arrow that
+                // moved them would silently undo itself.
+                can_up: index > 0 && !pinned_first && !pinned_last,
+                can_down: index + 1 < count && !pinned_first && !pinned_last,
+                ..Default::default()
+            });
+
+            // Catalog order, so a stage always presents its knobs the same way round — and
+            // anything the file carries that the catalog does not know about after it, rather
+            // than dropped.
+            let mut seen: Vec<&str> = Vec::new();
+            if let Some(spec) = spec {
+                for p in spec.params {
+                    seen.push(p.key);
+                    let stored = stage.params.iter().find(|q| q.key == p.key);
+                    let mut row = EditorRow {
+                        stage_index: index as i32,
+                        stage_kind: stage.kind.clone().into(),
+                        key: p.key.into(),
+                        label: p.label.into(),
+                        unit: p.unit.into(),
+                        help: p.help.into(),
+                        ..Default::default()
+                    };
+                    match p.kind {
+                        ParamKind::Float { default, soft_min, soft_max, decimals } => {
+                            let value = stored.map(|s| s.value).unwrap_or(default);
+                            let lo = soft_min.min(value);
+                            let hi = if soft_max > value { soft_max } else { value };
+                            row.kind = "float".into();
+                            row.value = value as f32;
+                            row.minimum = lo as f32;
+                            row.maximum = if hi > lo { hi as f32 } else { (lo + 1.0) as f32 };
+                            row.display =
+                                format!("{:.*}", decimals.min(6) as usize, value).into();
+                        }
+                        ParamKind::Bool { default } => {
+                            row.kind = "bool".into();
+                            row.flag = stored
+                                .map(|s| s.text == "true")
+                                .unwrap_or(default);
+                        }
+                        ParamKind::Choice { default, options } => {
+                            row.kind = "choice".into();
+                            row.choice = stored
+                                .map(|s| s.text.clone())
+                                .unwrap_or_else(|| default.to_string())
+                                .into();
+                            row.options = ModelRc::from(Rc::new(VecModel::from(
+                                options
+                                    .iter()
+                                    .map(|o| SharedString::from(*o))
+                                    .collect::<Vec<_>>(),
+                            )));
+                        }
+                        ParamKind::Binding => {
+                            row.kind = "binding".into();
+                            row.choice = stored.map(|s| s.text.clone()).unwrap_or_default().into();
+                        }
+                    }
+                    out.push(row);
+                }
             }
-            // A stage with no parameters still needs its heading, or it vanishes from an
-            // editor that is supposed to show the pipeline as it is.
-            if stage.params.is_empty() {
-                params.push(ParamRow {
+
+            // A key the file has and the catalog does not — an older schema, or a hand-written
+            // experiment. Shown read-only rather than hidden: silently omitting it is exactly
+            // what the format-preserving config exists to prevent.
+            for param in &stage.params {
+                if seen.contains(&param.key.as_str()) {
+                    continue;
+                }
+                out.push(EditorRow {
                     stage_index: index as i32,
                     stage_kind: stage.kind.clone().into(),
-                    stage_enabled: stage.enabled,
-                    first_of_stage: true,
-                    numeric: false,
-                    label: "no parameters".into(),
+                    key: param.key.clone().into(),
+                    label: presets::humanise(&param.key).into(),
+                    kind: "binding".into(),
+                    choice: param.text.clone().into(),
                     ..Default::default()
                 });
             }
@@ -242,15 +299,71 @@ fn apply_presets(app: &App, selected: usize) {
     }
 
     app.set_presets(ModelRc::from(Rc::new(VecModel::from(rows))));
-    app.set_params(ModelRc::from(Rc::new(VecModel::from(params))));
+    app.set_params(ModelRc::from(Rc::new(VecModel::from(out))));
     app.set_selected_preset(selected as i32);
 }
 
-/// The path of the preset currently selected, for a write.
-fn selected_path(app: &App) -> Option<std::path::PathBuf> {
-    let files = presets::load_all();
-    let index = app.get_selected_preset().max(0) as usize;
-    files.get(index).map(|f| f.path.clone())
+fn apply_profiles(app: &App, selected: usize) {
+    let files = profiles::load_all();
+    let rows: Vec<ProfileRow> = files
+        .iter()
+        .map(|f| ProfileRow {
+            slug: f.slug.clone().into(),
+            name: f.display_name.clone().into(),
+        })
+        .collect();
+
+    let selected = selected.min(files.len().saturating_sub(1));
+    let mut slots: Vec<SlotRow> = Vec::new();
+    if let Some(file) = files.get(selected) {
+        let count = file.modes.len();
+        for (index, slot) in file.modes.iter().enumerate() {
+            slots.push(SlotRow {
+                index: index as i32,
+                name: slot.name.clone().into(),
+                output: slot.output.clone().into(),
+                preset: slot.preset.clone().into(),
+                // Slots are 1-based everywhere the user can see them.
+                is_default: file.default_mode == index + 1,
+                can_up: index > 0,
+                can_down: index + 1 < count,
+            });
+        }
+        app.set_selected_profile_path(file.path.display().to_string().into());
+    } else {
+        app.set_selected_profile_path(Default::default());
+    }
+
+    app.set_profiles(ModelRc::from(Rc::new(VecModel::from(rows))));
+    app.set_slots(ModelRc::from(Rc::new(VecModel::from(slots))));
+    app.set_selected_profile(selected as i32);
+
+    // The presets a slot may point at, so the choice is never a free-text guess at a slug.
+    let names: Vec<SharedString> = presets::load_all()
+        .iter()
+        .map(|p| SharedString::from(p.slug.clone()))
+        .collect();
+    app.set_preset_slugs(ModelRc::from(Rc::new(VecModel::from(names))));
+}
+
+/// Report what went wrong where the user is looking, rather than only on a terminal they may
+/// never see. Cleared by the next successful action.
+fn notice(app: &App, message: impl std::fmt::Display) {
+    let text = message.to_string();
+    eprintln!("{text}");
+    app.set_notice(text.into());
+}
+
+fn selected_preset_path(app: &App) -> Option<std::path::PathBuf> {
+    presets::load_all()
+        .get(app.get_selected_preset().max(0) as usize)
+        .map(|f| f.path.clone())
+}
+
+fn selected_profile_path(app: &App) -> Option<std::path::PathBuf> {
+    profiles::load_all()
+        .get(app.get_selected_profile().max(0) as usize)
+        .map(|f| f.path.clone())
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -286,6 +399,33 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     apply_presets(&app, 0);
+    apply_profiles(&app, 0);
+    app.set_outputs(ModelRc::from(Rc::new(VecModel::from(
+        profiles::OUTPUTS
+            .iter()
+            .map(|o| SharedString::from(*o))
+            .collect::<Vec<_>>(),
+    ))));
+    app.set_stage_kinds(ModelRc::from(Rc::new(VecModel::from(
+        stabmouse_config::STAGES
+            .iter()
+            .map(|s| SharedString::from(s.kind))
+            .collect::<Vec<_>>(),
+    ))));
+
+    // Every editor action ends the same way: do it, then re-read from disk. Re-reading rather
+    // than patching the model in place is what keeps the window showing the file's truth —
+    // including any rounding the format-preserving editor applied, and any edit made in a
+    // text editor since.
+    macro_rules! after {
+        ($app:expr, $result:expr, $reload:expr) => {{
+            match $result {
+                Ok(()) => $app.set_notice(Default::default()),
+                Err(e) => notice(&$app, e),
+            }
+            $reload;
+        }};
+    }
 
     let weak = app.as_weak();
     app.on_select_preset(move |index| {
@@ -295,35 +435,237 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = app.as_weak();
-    app.on_set_param(move |stage_index, key, value| {
+    app.on_create_preset(move |name| {
         let Some(app) = weak.upgrade() else { return };
-        let Some(path) = selected_path(&app) else { return };
-        if let Err(e) = presets::write_param(
-            &path,
-            stage_index.max(0) as usize,
-            key.as_str(),
-            f64::from(value),
-        ) {
-            // Not fatal and not silent. A write that failed — a read-only file, a full disk —
-            // must not look like one that worked, because the daemon will go on using the old
-            // value and the interface would be the only thing claiming otherwise.
-            eprintln!("could not write {key}: {e}");
+        match presets::create_preset(name.as_str()) {
+            Ok(_) => {
+                app.set_notice(Default::default());
+                // Land on what was just made, which is what the user is about to fill in.
+                let files = presets::load_all();
+                let index = files
+                    .iter()
+                    .position(|f| f.slug == presets::slugify(name.as_str()))
+                    .unwrap_or(0);
+                apply_presets(&app, index);
+                apply_profiles(&app, app.get_selected_profile().max(0) as usize);
+            }
+            Err(e) => notice(&app, e),
         }
-        // Re-read rather than trusting the write: what the file now says is what the daemon
-        // will load, and any rounding the format-preserving editor applied belongs on screen.
-        let selected = app.get_selected_preset().max(0) as usize;
-        apply_presets(&app, selected);
     });
 
     let weak = app.as_weak();
-    app.on_set_stage_enabled(move |stage_index, enabled| {
+    app.on_delete_preset(move || {
         let Some(app) = weak.upgrade() else { return };
-        let Some(path) = selected_path(&app) else { return };
-        if let Err(e) = presets::write_stage_enabled(&path, stage_index.max(0) as usize, enabled) {
-            eprintln!("could not toggle stage: {e}");
+        let Some(path) = selected_preset_path(&app) else { return };
+        let slug = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        // Reference integrity is a stated rule (modules.md): never silently break a profile.
+        let used_by = presets::profiles_using(&slug);
+        if !used_by.is_empty() {
+            notice(
+                &app,
+                format!(
+                    "'{slug}' is still used by {}. Point those slots elsewhere first.",
+                    used_by.join(", ")
+                ),
+            );
+            return;
         }
+        after!(app, presets::delete_preset(&path), apply_presets(&app, 0));
+    });
+
+    let weak = app.as_weak();
+    app.on_add_stage(move |kind| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else {
+            notice(&app, "create a preset first");
+            return;
+        };
         let selected = app.get_selected_preset().max(0) as usize;
-        apply_presets(&app, selected);
+        after!(app, presets::add_stage(&path, kind.as_str()), apply_presets(&app, selected));
+    });
+
+    let weak = app.as_weak();
+    app.on_remove_stage(move |index| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::remove_stage(&path, index.max(0) as usize),
+            apply_presets(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_move_stage(move |index, delta| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::move_stage(&path, index.max(0) as usize, delta),
+            apply_presets(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_set_stage_enabled(move |index, enabled| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::write_stage_enabled(&path, index.max(0) as usize, enabled),
+            apply_presets(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_set_param_float(move |index, key, value| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::write_param(&path, index.max(0) as usize, key.as_str(), f64::from(value)),
+            apply_presets(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_set_param_bool(move |index, key, value| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::write_param_text(
+                &path,
+                index.max(0) as usize,
+                key.as_str(),
+                toml::Value::Boolean(value)
+            ),
+            apply_presets(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_set_param_text(move |index, key, value| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_preset_path(&app) else { return };
+        let selected = app.get_selected_preset().max(0) as usize;
+        after!(
+            app,
+            presets::write_param_text(
+                &path,
+                index.max(0) as usize,
+                key.as_str(),
+                toml::Value::String(value.to_string())
+            ),
+            apply_presets(&app, selected)
+        );
+    });
+
+    // ---------------------------------------------------------------- profiles
+
+    let weak = app.as_weak();
+    app.on_select_profile(move |index| {
+        if let Some(app) = weak.upgrade() {
+            apply_profiles(&app, index.max(0) as usize);
+        }
+    });
+
+    let weak = app.as_weak();
+    app.on_create_profile(move |name| {
+        let Some(app) = weak.upgrade() else { return };
+        match profiles::create(name.as_str()) {
+            Ok(_) => {
+                app.set_notice(Default::default());
+                let files = profiles::load_all();
+                let index = files
+                    .iter()
+                    .position(|f| f.slug == presets::slugify(name.as_str()))
+                    .unwrap_or(0);
+                apply_profiles(&app, index);
+            }
+            Err(e) => notice(&app, e),
+        }
+    });
+
+    let weak = app.as_weak();
+    app.on_delete_profile(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_profile_path(&app) else { return };
+        after!(app, profiles::delete(&path), apply_profiles(&app, 0));
+    });
+
+    let weak = app.as_weak();
+    app.on_add_slot(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_profile_path(&app) else {
+            notice(&app, "create a profile first");
+            return;
+        };
+        // Points at whatever preset exists, so a new slot is valid the moment it appears
+        // rather than referring to a name that is not there.
+        let preset = presets::load_all()
+            .first()
+            .map(|p| p.slug.clone())
+            .unwrap_or_else(|| "raw".to_string());
+        let selected = app.get_selected_profile().max(0) as usize;
+        after!(
+            app,
+            profiles::add_mode(&path, "New mode", "mouse", &preset),
+            apply_profiles(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_remove_slot(move |index| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_profile_path(&app) else { return };
+        let selected = app.get_selected_profile().max(0) as usize;
+        after!(
+            app,
+            profiles::remove_mode(&path, index.max(0) as usize),
+            apply_profiles(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_move_slot(move |index, delta| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_profile_path(&app) else { return };
+        let selected = app.get_selected_profile().max(0) as usize;
+        after!(
+            app,
+            profiles::move_mode(&path, index.max(0) as usize, delta),
+            apply_profiles(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_set_slot_field(move |index, field, value| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_profile_path(&app) else { return };
+        let selected = app.get_selected_profile().max(0) as usize;
+        after!(
+            app,
+            profiles::set_mode_field(&path, index.max(0) as usize, field.as_str(), value.as_str()),
+            apply_profiles(&app, selected)
+        );
+    });
+
+    let weak = app.as_weak();
+    app.on_set_default_slot(move |index| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = selected_profile_path(&app) else { return };
+        let selected = app.get_selected_profile().max(0) as usize;
+        after!(
+            app,
+            profiles::set_default_mode(&path, index.max(0) as usize + 1),
+            apply_profiles(&app, selected)
+        );
     });
 
     app.run()

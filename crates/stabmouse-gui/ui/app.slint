@@ -170,31 +170,136 @@ component NoticeCard inherits Card {
     }
 }
 
-// One row of the preset editor. A single flat list rather than a list of stages each holding
-// a list of parameters: Slint models do not nest comfortably, and `first-of-stage` carries the
-// grouping without the structure.
-struct ParamRow {
+// One row of the preset editor: either a stage heading or one of its parameters.
+//
+// A single flat list rather than stages each holding parameters — Slint models do not nest,
+// and a header flag carries the structure without the nesting. It also lets a stage with no
+// parameters still draw its heading, which a nested model would have hidden.
+struct EditorRow {
+    is-header: bool,
     stage-index: int,
     stage-kind: string,
+    stage-label: string,
     stage-enabled: bool,
-    first-of-stage: bool,
+    can-up: bool,
+    can-down: bool,
+
     key: string,
     label: string,
     unit: string,
     help: string,
+    // "float" | "bool" | "choice" | "binding"
+    kind: string,
     value: float,
     minimum: float,
     maximum: float,
-    numeric: bool,
-    text: string,
-    // Formatted in Rust at the parameter's own precision: a resolution reads `1600`, a radius
-    // reads `0.4`, and neither is padded with digits it does not have.
     display: string,
+    flag: bool,
+    choice: string,
+    options: [string],
 }
 
 struct PresetRow {
     slug: string,
     name: string,
+}
+
+struct SlotRow {
+    index: int,
+    name: string,
+    output: string,
+    preset: string,
+    is-default: bool,
+    can-up: bool,
+    can-down: bool,
+}
+
+struct ProfileRow {
+    slug: string,
+    name: string,
+}
+
+// Two or three options as segmented buttons, per gui.md. Every enum in the catalog has three
+// options or fewer, so no dropdown is needed anywhere.
+component Segmented inherits HorizontalLayout {
+    in property <[string]> options;
+    in property <string> chosen;
+    callback picked(string);
+
+    spacing: 0px;
+    for opt in options: Rectangle {
+        height: 26px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: opt == chosen ? Theme.accent.with-alpha(0.18)
+                  : (seg.has-hover ? Theme.line.with-alpha(0.5) : transparent);
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            Text {
+                text: opt;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                font-size: Theme.size-muted;
+                color: opt == chosen ? Theme.accent : Theme.text;
+            }
+        }
+        seg := TouchArea { clicked => { picked(opt); } }
+    }
+}
+
+component Toggle inherits Rectangle {
+    in property <bool> on;
+    callback switched(bool);
+
+    width: 42px;
+    height: 24px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: on ? Theme.accent.with-alpha(0.35) : Theme.line.with-alpha(0.4);
+
+    Rectangle {
+        x: root.on ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: root.on ? Theme.accent : Theme.muted;
+    }
+    TouchArea { clicked => { root.switched(!root.on); } }
+}
+
+component Field inherits Rectangle {
+    in property <string> text;
+    in property <string> placeholder;
+    callback committed(string);
+
+    height: 28px;
+    border-radius: Theme.radius-control;
+    border-width: 1px;
+    border-color: inner.has-focus ? Theme.accent : Theme.line;
+    background: Theme.ground;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        if root.text == "" && !inner.has-focus: Text {
+            text: root.placeholder;
+            font-size: Theme.size-muted;
+            color: Theme.muted;
+            vertical-alignment: center;
+        }
+        inner := TextInput {
+            text: root.text;
+            font-size: Theme.size-base;
+            font-family: "monospace";
+            color: Theme.text;
+            vertical-alignment: center;
+            single-line: true;
+            accepted => { root.committed(self.text); self.clear-focus(); }
+        }
+    }
 }
 
 // A slider track, hand-rolled to match the rest rather than importing a widget set whose
@@ -203,7 +308,6 @@ component Track inherits Rectangle {
     in property <float> minimum;
     in property <float> maximum;
     in property <float> value;
-    in property <bool> active: true;
     callback moved(float);
 
     height: 22px;
@@ -222,7 +326,7 @@ component Track inherits Rectangle {
         width: root.width * root.frac;
         height: 4px;
         border-radius: 2px;
-        background: root.active ? Theme.accent.with-alpha(0.7) : Theme.muted.with-alpha(0.4);
+        background: Theme.accent.with-alpha(0.7);
     }
     Rectangle {
         x: root.width * root.frac - 7px;
@@ -230,11 +334,9 @@ component Track inherits Rectangle {
         width: 14px;
         height: 14px;
         border-radius: 7px;
-        background: root.active ? Theme.accent : Theme.muted;
+        background: Theme.accent;
     }
-
-    ta := TouchArea {
-        enabled: root.active;
+    TouchArea {
         moved => {
             root.moved(root.minimum + root.span * clamp(self.mouse-x / root.width, 0.0, 1.0));
         }
@@ -246,11 +348,10 @@ component Track inherits Rectangle {
     }
 }
 
-// The default control everywhere: slider and numeric field, side by side, always both
-// (gui.md). The slider spans the *recommended* range and the field accepts anything — typing
-// past the end pins the handle while the field keeps showing the truth.
+// Slider and numeric field, side by side, always both (gui.md). The slider spans the
+// recommended range and the field accepts anything past it.
 component ParamControl inherits Rectangle {
-    in property <ParamRow> param;
+    in property <EditorRow> param;
     in property <bool> show-keys;
     callback changed(float);
 
@@ -258,7 +359,6 @@ component ParamControl inherits Rectangle {
 
     VerticalLayout {
         spacing: 2px;
-
         HorizontalLayout {
             spacing: Theme.gap;
             Text {
@@ -268,7 +368,6 @@ component ParamControl inherits Rectangle {
                 vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; }
-            // Every control admits what it writes (gui.md).
             if root.show-keys: Text {
                 text: root.param.key;
                 font-family: "monospace";
@@ -277,10 +376,8 @@ component ParamControl inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-
         HorizontalLayout {
             spacing: Theme.gap;
-
             Track {
                 horizontal-stretch: 1;
                 minimum: root.param.minimum;
@@ -288,21 +385,19 @@ component ParamControl inherits Rectangle {
                 value: root.param.value;
                 moved(v) => { root.changed(v); }
             }
-
             Rectangle {
                 width: 92px;
                 border-radius: Theme.radius-control;
                 border-width: 1px;
                 border-color: input.has-focus ? Theme.accent : Theme.line;
                 background: Theme.ground;
-
                 HorizontalLayout {
                     padding-left: 8px;
                     padding-right: 8px;
                     spacing: 2px;
                     input := TextInput {
-                        // The field shows the stored value, never the slider's clamped view
-                        // of it — that is what "fields decide" means.
+                        // Shows the stored value, never the slider's clamped view of it —
+                        // that is what "fields decide" means.
                         text: root.param.display;
                         font-size: Theme.size-base;
                         font-family: "monospace";
@@ -310,10 +405,7 @@ component ParamControl inherits Rectangle {
                         vertical-alignment: center;
                         horizontal-alignment: right;
                         single-line: true;
-                        accepted => {
-                            root.changed(self.text.to-float());
-                            self.clear-focus();
-                        }
+                        accepted => { root.changed(self.text.to-float()); self.clear-focus(); }
                     }
                     Text {
                         text: root.param.unit;
@@ -357,18 +449,47 @@ export component App inherits Window {
 
     // Preset editor.
     in property <[PresetRow]> presets;
-    in property <[ParamRow]> params;
+    in property <[EditorRow]> params;
+    in property <[string]> stage-kinds;
     in-out property <int> selected-preset;
     in property <string> selected-preset-path;
+
+    // Profile editor.
+    in property <[ProfileRow]> profiles;
+    in property <[SlotRow]> slots;
+    in-out property <int> selected-profile;
+    in property <string> selected-profile-path;
+    in property <[string]> outputs;
+    in property <[string]> preset-slugs;
+
+    in property <string> notice;
+
     property <string> page: "dashboard";
     property <bool> show-keys: false;
 
     callback switch-to(int);
     callback set-enabled(bool);
     callback refresh();
+
     callback select-preset(int);
-    callback set-param(int, string, float);
+    callback create-preset(string);
+    callback delete-preset();
+    callback add-stage(string);
+    callback remove-stage(int);
+    callback move-stage(int, int);
     callback set-stage-enabled(int, bool);
+    callback set-param-float(int, string, float);
+    callback set-param-bool(int, string, bool);
+    callback set-param-text(int, string, string);
+
+    callback select-profile(int);
+    callback create-profile(string);
+    callback delete-profile();
+    callback add-slot();
+    callback remove-slot(int);
+    callback move-slot(int, int);
+    callback set-slot-field(int, string, string);
+    callback set-default-slot(int);
 
     HorizontalLayout {
         // -------------------------------------------------------------- sidebar
@@ -397,7 +518,11 @@ export component App inherits Window {
                 }
                 // Honest about what exists. A navigation item that opens nothing is worse
                 // than one that says it is not built yet.
-                NavItem { label: "Profiles"; enabled-item: false; }
+                NavItem {
+                    label: "Profiles";
+                    selected: page == "profiles";
+                    clicked => { page = "profiles"; }
+                }
                 NavItem {
                     label: "Presets";
                     selected: page == "presets";
@@ -620,11 +745,10 @@ export component App inherits Window {
         // ------------------------------------------------------------- presets
         //
         // Edits land in the preset file and the daemon's own watch picks them up within about
-        // 0.4s, so the loop is: drag, draw, judge. Every filter finding in this project came
-        // from drawing rather than from reasoning, which is why the editor exists at all.
+        // 0.4s, so the loop is: change, draw, judge. Every filter finding in this project came
+        // from drawing rather than from reasoning, which is why this exists at all.
         if page == "presets": Rectangle {
             background: Theme.ground;
-
             HorizontalLayout {
                 Rectangle {
                     width: 220px;
@@ -643,16 +767,12 @@ export component App inherits Window {
                         for entry[i] in presets: NavItem {
                             label: entry.name;
                             selected: i == selected-preset;
-                            clicked => {
-                                selected-preset = i;
-                                select-preset(i);
-                            }
+                            clicked => { selected-preset = i; select-preset(i); }
                         }
-                        if presets.length == 0: Text {
-                            text: "No presets found. `stabmoused init` writes a starter set.";
-                            font-size: Theme.size-muted;
-                            color: Theme.muted;
-                            wrap: word-wrap;
+                        Rectangle { height: Theme.gap; }
+                        Field {
+                            placeholder: "New preset name…";
+                            committed(name) => { create-preset(name); }
                         }
                         Rectangle { vertical-stretch: 1; }
                     }
@@ -670,7 +790,7 @@ export component App inherits Window {
                             height: 32px;
                             spacing: Theme.gap;
                             Text {
-                                text: presets.length > 0 ? presets[selected-preset].name : "";
+                                text: presets.length > 0 ? presets[selected-preset].name : "No presets";
                                 font-size: Theme.size-heading;
                                 font-weight: 600;
                                 color: Theme.text;
@@ -681,6 +801,11 @@ export component App inherits Window {
                                 label: show-keys ? "Hide keys" : "Show keys";
                                 clicked => { show-keys = !show-keys; }
                             }
+                            if presets.length > 0: Button {
+                                label: "Delete preset";
+                                danger: true;
+                                clicked => { delete-preset(); }
+                            }
                         }
 
                         Text {
@@ -690,75 +815,125 @@ export component App inherits Window {
                             color: Theme.muted;
                         }
 
-                        // An editor with no save button owes the user this sentence.
-                        Text {
-                            text: "Changes save as you make them, and reach a running daemon in about half a second.";
-                            font-size: Theme.size-muted;
-                            color: Theme.muted;
-                            wrap: word-wrap;
+                        if notice != "": NoticeCard {
+                            title: "Config";
+                            body: notice;
+                            tone: Theme.warning;
+                        }
+
+                        // Add a stage. Every kind the config accepts, so the editor never
+                        // offers less than the file format does.
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "Add:";
+                                font-size: Theme.size-muted;
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                            }
+                            for kind in stage-kinds: Button {
+                                label: kind;
+                                clicked => { add-stage(kind); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
                         }
 
                         Flickable {
                             vertical-stretch: 1;
                             viewport-height: content.preferred-height;
-
                             content := VerticalLayout {
                                 spacing: 4px;
 
                                 for pr[i] in params: VerticalLayout {
                                     spacing: 4px;
 
-                                    // Stage heading on the first parameter of each stage —
-                                    // the flat model's substitute for nesting.
-                                    if pr.first-of-stage: HorizontalLayout {
-                                        height: 40px;
-                                        spacing: Theme.gap;
-                                        Text {
-                                            text: pr.stage-kind;
-                                            font-family: "monospace";
-                                            font-size: Theme.size-base;
-                                            font-weight: 600;
-                                            color: pr.stage-enabled ? Theme.accent : Theme.muted;
-                                            vertical-alignment: center;
-                                        }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        Button {
-                                            label: pr.stage-enabled ? "Enabled" : "Disabled";
-                                            primary: pr.stage-enabled;
-                                            clicked => {
-                                                set-stage-enabled(pr.stage-index, !pr.stage-enabled);
+                                    if pr.is-header: Rectangle {
+                                        height: 44px;
+                                        background: Theme.surface;
+                                        border-radius: Theme.radius-card;
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            spacing: 6px;
+                                            Text {
+                                                text: pr.stage-label;
+                                                font-size: Theme.size-base;
+                                                font-weight: 600;
+                                                color: pr.stage-enabled ? Theme.text : Theme.muted;
+                                                vertical-alignment: center;
+                                            }
+                                            if show-keys: Text {
+                                                text: pr.stage-kind;
+                                                font-family: "monospace";
+                                                font-size: Theme.size-muted;
+                                                color: Theme.muted;
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            // Pinned stages cannot move: normalize must be
+                                            // first and pressure last, and an arrow that
+                                            // silently undoes itself is worse than none.
+                                            if pr.can-up: Button {
+                                                label: "↑";
+                                                clicked => { move-stage(pr.stage-index, -1); }
+                                            }
+                                            if pr.can-down: Button {
+                                                label: "↓";
+                                                clicked => { move-stage(pr.stage-index, 1); }
+                                            }
+                                            Toggle {
+                                                on: pr.stage-enabled;
+                                                switched(v) => { set-stage-enabled(pr.stage-index, v); }
+                                            }
+                                            Button {
+                                                label: "Remove";
+                                                danger: true;
+                                                clicked => { remove-stage(pr.stage-index); }
                                             }
                                         }
                                     }
 
-                                    if pr.numeric: ParamControl {
+                                    if !pr.is-header && pr.kind == "float": ParamControl {
                                         param: pr;
                                         show-keys: show-keys;
-                                        changed(v) => { set-param(pr.stage-index, pr.key, v); }
+                                        changed(v) => { set-param-float(pr.stage-index, pr.key, v); }
                                     }
 
-                                    // Shown, not hidden: an editor that omits what it cannot
-                                    // render lies about the preset's contents.
-                                    if !pr.numeric: HorizontalLayout {
-                                        height: 28px;
+                                    if !pr.is-header && pr.kind != "float": HorizontalLayout {
+                                        height: 34px;
                                         spacing: Theme.gap;
                                         Text {
                                             text: pr.label;
                                             font-size: Theme.size-base;
-                                            color: Theme.muted;
+                                            color: Theme.text;
                                             vertical-alignment: center;
                                         }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        Text {
-                                            text: pr.text;
+                                        if show-keys: Text {
+                                            text: pr.key;
                                             font-family: "monospace";
                                             font-size: Theme.size-muted;
                                             color: Theme.muted;
                                             vertical-alignment: center;
                                         }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        if pr.kind == "bool": Toggle {
+                                            on: pr.flag;
+                                            switched(v) => { set-param-bool(pr.stage-index, pr.key, v); }
+                                        }
+                                        if pr.kind == "choice": Segmented {
+                                            options: pr.options;
+                                            chosen: pr.choice;
+                                            picked(v) => { set-param-text(pr.stage-index, pr.key, v); }
+                                        }
+                                        if pr.kind == "binding": Field {
+                                            width: 180px;
+                                            text: pr.choice;
+                                            placeholder: "BTN_SIDE / KEY_LEFTSHIFT";
+                                            committed(v) => { set-param-text(pr.stage-index, pr.key, v); }
+                                        }
                                     }
 
-                                    if show-keys && pr.help != "": Text {
+                                    if !pr.is-header && show-keys && pr.help != "": Text {
                                         text: pr.help;
                                         font-size: Theme.size-muted;
                                         color: Theme.muted;
@@ -766,8 +941,176 @@ export component App inherits Window {
                                     }
                                 }
 
-                                if params.length == 0: Text {
-                                    text: "This preset has no stages yet.";
+                                if params.length == 0 && presets.length > 0: Text {
+                                    text: "This preset has no stages. Add one above.";
+                                    font-size: Theme.size-muted;
+                                    color: Theme.muted;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------ profiles
+        //
+        // A profile is the list the mode toggle cycles through, so this is where a preset
+        // becomes something reachable by a hotkey.
+        if page == "profiles": Rectangle {
+            background: Theme.ground;
+            HorizontalLayout {
+                Rectangle {
+                    width: 220px;
+                    background: Theme.surface;
+                    VerticalLayout {
+                        padding: Theme.gap;
+                        spacing: 2px;
+                        Text {
+                            text: "Profiles";
+                            font-size: Theme.size-heading;
+                            font-weight: 600;
+                            color: Theme.text;
+                            height: 40px;
+                            vertical-alignment: center;
+                        }
+                        for entry[i] in profiles: NavItem {
+                            label: entry.name;
+                            selected: i == selected-profile;
+                            clicked => { selected-profile = i; select-profile(i); }
+                        }
+                        Rectangle { height: Theme.gap; }
+                        Field {
+                            placeholder: "New profile name…";
+                            committed(name) => { create-profile(name); }
+                        }
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+
+                Rectangle { width: 1px; background: Theme.line; }
+
+                Rectangle {
+                    background: Theme.ground;
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: Theme.gap;
+
+                        HorizontalLayout {
+                            height: 32px;
+                            spacing: Theme.gap;
+                            Text {
+                                text: profiles.length > 0 ? profiles[selected-profile].name : "No profiles";
+                                font-size: Theme.size-heading;
+                                font-weight: 600;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            if profiles.length > 0: Button {
+                                label: "Add slot";
+                                primary: true;
+                                clicked => { add-slot(); }
+                            }
+                            if profiles.length > 0: Button {
+                                label: "Delete profile";
+                                danger: true;
+                                clicked => { delete-profile(); }
+                            }
+                        }
+
+                        Text {
+                            text: selected-profile-path;
+                            font-family: "monospace";
+                            font-size: Theme.size-muted;
+                            color: Theme.muted;
+                        }
+
+                        if notice != "": NoticeCard {
+                            title: "Config";
+                            body: notice;
+                            tone: Theme.warning;
+                        }
+
+                        Flickable {
+                            vertical-stretch: 1;
+                            viewport-height: slotlist.preferred-height;
+                            slotlist := VerticalLayout {
+                                spacing: 6px;
+
+                                for slot[i] in slots: Rectangle {
+                                    height: 84px;
+                                    background: Theme.surface;
+                                    border-radius: Theme.radius-card;
+                                    border-width: 1px;
+                                    border-color: Theme.line;
+
+                                    VerticalLayout {
+                                        padding: 10px;
+                                        spacing: 6px;
+
+                                        HorizontalLayout {
+                                            spacing: Theme.gap;
+                                            Text {
+                                                text: "Slot " + (slot.index + 1);
+                                                font-size: Theme.size-muted;
+                                                color: Theme.muted;
+                                                vertical-alignment: center;
+                                                width: 48px;
+                                            }
+                                            Field {
+                                                width: 160px;
+                                                text: slot.name;
+                                                placeholder: "Name";
+                                                committed(v) => { set-slot-field(slot.index, "name", v); }
+                                            }
+                                            Segmented {
+                                                options: outputs;
+                                                chosen: slot.output;
+                                                picked(v) => { set-slot-field(slot.index, "output", v); }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            if slot.can-up: Button {
+                                                label: "↑";
+                                                clicked => { move-slot(slot.index, -1); }
+                                            }
+                                            if slot.can-down: Button {
+                                                label: "↓";
+                                                clicked => { move-slot(slot.index, 1); }
+                                            }
+                                            Button {
+                                                label: "Remove";
+                                                danger: true;
+                                                clicked => { remove-slot(slot.index); }
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            Text {
+                                                text: "Preset:";
+                                                font-size: Theme.size-muted;
+                                                color: Theme.muted;
+                                                vertical-alignment: center;
+                                                width: 48px;
+                                            }
+                                            for name in preset-slugs: Button {
+                                                label: name;
+                                                primary: name == slot.preset;
+                                                clicked => { set-slot-field(slot.index, "preset", name); }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            Button {
+                                                label: slot.is-default ? "Default" : "Make default";
+                                                primary: slot.is-default;
+                                                clicked => { set-default-slot(slot.index); }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if slots.length == 0 && profiles.length > 0: Text {
+                                    text: "This profile has no slots. Add one above.";
                                     font-size: Theme.size-muted;
                                     color: Theme.muted;
                                 }
