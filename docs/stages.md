@@ -198,11 +198,44 @@ Consequences, all of them wanted:
 
 | Param | Type | Notes |
 |---|---|---|
-| `window_ms` | f64 | **Milliseconds, not samples** |
-| `weighting` | enum | `linear` · `exponential` · `gaussian` |
+| `window_ms` | f64 | **Milliseconds, not samples.** 0 is the identity |
+| `weighting` | enum | `exponential` (default) · `linear` · `gaussian` |
 
 A window in samples means different things at 125 Hz and 8000 Hz. Time is the
 portable unit.
+
+Averages *position* and emits the change in that average, so motion is conserved:
+the path lags but always arrives. It reports itself unsettled while it still owes
+lag, which is what keeps the daemon's settle phase feeding it zero-motion ticks
+until the stroke ends where the hand did.
+
+**Measured on `supershaky.tsv`, 2026-08-01**, replaying one recording through every
+candidate. Wobble is the reduction in total path length for the same net
+displacement; lag is mean distance behind the unfiltered path.
+
+| window | `exponential` | `linear` | `gaussian` |
+|---|---|---|---|
+| 20ms | 10.7% / 0.026mm | 11.1% / 0.032mm | 10.6% / 0.026mm |
+| 50ms | **20.9% / 0.057mm** | 21.5% / 0.069mm | 17.9% / 0.058mm |
+| 80ms | 28.7% / 0.081mm | 31.0% / 0.095mm | 26.6% / 0.081mm |
+| 120ms | 34.0% / 0.109mm | 36.2% / 0.128mm | 33.2% / 0.108mm |
+
+**`exponential` is the default because it is the most efficient at every window** —
+it removes the most wobble per millimetre of lag. `linear` removes more wobble at a
+given window but pays proportionally more lag for it, and it is the most predictable
+to reason about: halving the window halves the lag. `gaussian` was consistently the
+weakest here and is kept for the case it is meant for, a single jittery sample rather
+than continuous tremor.
+
+**50ms is the useful starting point** — a fifth of the wobble gone for lag that is
+under a tenth of a millimetre, well below the 0.4mm a `stabilize` radius costs by
+design. Note the shape of the curve: wobble reduction is sublinear in window size
+while lag is very nearly linear, so past ~100ms each extra millisecond buys less and
+costs the same.
+
+Not a replacement for `stabilize`, which removed 95% of the same wobble at 2.7mm of
+lag. These are different tools: `average` takes the tremor off an otherwise fine
+line, `stabilize` reshapes the line entirely.
 
 ## `snap`
 
@@ -457,6 +490,8 @@ the preset, not the program.
 | Daemon tick interval | `2ms` | **measured** — 0.033 envelope steps against a 60ms attack; 4ms gave the visible 0.067 steps. Most gaps are already under 2ms so it rarely fires |
 | `smooth.min_cutoff_hz` | `5.0` general · `2.0` tremor | **measured** — see sweep below |
 | `smooth.beta` | `0.05` general · `0.2` tremor | **measured** — see sweep below |
+| `average.window_ms` | `0` (off) · `50` when used | **measured** (2026-08-01) — 21% of path wobble for 0.057mm of lag; the curve flattens past ~100ms while lag keeps growing. Off by default because `smooth` already occupies this role in the shipped presets |
+| `average.weighting` | `exponential` | **measured** (2026-08-01) — most wobble removed per millimetre of lag at every window tested |
 
 #### `smooth` sweep
 

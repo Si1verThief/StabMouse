@@ -7,7 +7,8 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use stabmouse_core::stages::{
-    Normalize, Pressure, Sensitivity, SpeedSource, StallBehaviour, Smooth, Stabilize,
+    Average, Normalize, Pressure, Sensitivity, SpeedSource, StallBehaviour, Smooth, Stabilize,
+    Weighting,
 };
 use stabmouse_core::Pipeline;
 use std::path::Path;
@@ -29,6 +30,13 @@ pub struct Variant {
     pub stab_radius_mm: f64,
     #[serde(default = "one")]
     pub stab_catch_up: f64,
+
+    /// Zero is the identity, so an unset average changes nothing.
+    #[serde(default)]
+    pub average_window_ms: f64,
+    /// `"linear"`, `"exponential"` or `"gaussian"`.
+    #[serde(default = "linear")]
+    pub average_weighting: String,
 
     /// Effectively transparent by default.
     #[serde(default = "thousand")]
@@ -77,6 +85,9 @@ fn min_pressure_default() -> f64 {
 fn cursor() -> String {
     "cursor".into()
 }
+fn linear() -> String {
+    "linear".into()
+}
 fn hold() -> String {
     "hold".into()
 }
@@ -111,6 +122,12 @@ impl Variant {
         // Position filters before `sensitivity`, per the default order in stages.md:
         // their parameters are then in true hand millimetres, which is what makes a
         // shared preset transfer between setups.
+        let weighting = match self.average_weighting.as_str() {
+            "exponential" => Weighting::Exponential,
+            "gaussian" => Weighting::Gaussian,
+            _ => Weighting::Linear,
+        };
+
         Pipeline::new(vec![
             Box::new(Normalize::new(dpi)),
             Box::new(Smooth::new(
@@ -118,6 +135,7 @@ impl Variant {
                 self.smooth_beta,
                 self.smooth_d_cutoff_hz,
             )),
+            Box::new(Average::new(self.average_window_ms, weighting)),
             Box::new(Stabilize::new(self.stab_radius_mm, self.stab_catch_up)),
             Box::new(sens),
             Box::new(pressure),

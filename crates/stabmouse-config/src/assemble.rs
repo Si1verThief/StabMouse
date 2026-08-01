@@ -11,7 +11,8 @@
 use crate::cascade::DeviceView;
 use crate::schema::{Preset, StageEntry};
 use stabmouse_core::stages::{
-    Curve, Deadzone, Normalize, Pressure, Rotate, Sensitivity, Smooth, SpeedSource,
+    Average, Curve, Deadzone, Normalize, Pressure, Rotate, Sensitivity, Smooth, SpeedSource,
+    Weighting,
     StallBehaviour, Stabilize,
 };
 use stabmouse_core::{Pipeline, Stage};
@@ -21,7 +22,7 @@ use std::collections::BTreeSet;
 ///
 /// Listed explicitly so a preset referencing one gets an honest "not implemented yet"
 /// rather than a silent omission that leaves the user wondering why nothing changed.
-const PLANNED: &[&str] = &["average", "snap", "scroll"];
+const PLANNED: &[&str] = &["snap", "scroll"];
 
 pub struct Assembly {
     pub pipeline: Pipeline,
@@ -79,6 +80,7 @@ pub fn assemble(preset: &Preset, slug: &str, view: Option<&DeviceView<'_>>) -> A
                 p.f64("radius_mm", 0.4),
                 p.f64("catch_up", 0.35),
             ))),
+            "average" => Some(Box::new(build_average(&mut p))),
             "pressure" => Some(Box::new(build_pressure(&mut p))),
             other => {
                 if PLANNED.contains(&other) {
@@ -129,6 +131,24 @@ fn preset_params(
         }
     }
     params
+}
+
+fn build_average(p: &mut Params) -> Average {
+    // Zero is the identity and therefore the safe default: a stage named in a preset without
+    // parameters should do nothing visible rather than silently add lag.
+    let window_ms = p.f64("window_ms", 0.0);
+    // Exponential by measurement, not convention: it removed the most wobble per millimetre of
+    // lag at every window tested. See the table in stages.md.
+    let weighting = match p.str("weighting", "exponential").as_str() {
+        "exponential" => Weighting::Exponential,
+        "linear" => Weighting::Linear,
+        "gaussian" => Weighting::Gaussian,
+        other => {
+            p.warn(format!("unknown weighting '{other}'; using exponential"));
+            Weighting::Exponential
+        }
+    };
+    Average::new(window_ms, weighting)
 }
 
 fn build_sensitivity(p: &mut Params) -> Sensitivity {
