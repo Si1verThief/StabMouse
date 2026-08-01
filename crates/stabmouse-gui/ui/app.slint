@@ -1,0 +1,444 @@
+// StabMouse — window shell and dashboard.
+//
+// Implements docs/gui.md. The values here are not arbitrary: the colour sets, the 4px grid,
+// the 13/11/15px type scale and the 4px/6px radii are all fixed by that document, so changing
+// one is a decision to be recorded there rather than a tweak to be made here.
+
+// Every colour and metric in one place, so a theme change is one edit rather than a sweep.
+//
+// `accent` is filled in from Rust with the desktop's own selection colour. It stays a property
+// rather than a constant because reading it is what makes the application feel native instead
+// of like a foreign window that happens to be dark.
+export global Theme {
+    in property <color> accent: #6ea8fe;
+    // Set from Rust rather than read from Slint's palette, so the manual override required by
+    // the spec has somewhere to live.
+    in property <bool> dark: true;
+
+    out property <color> ground: dark ? #1b1b1f : #fafafb;
+    out property <color> surface: dark ? #25252b : #ffffff;
+    out property <color> text: dark ? #d8d8de : #1e1e24;
+    out property <color> muted: dark ? #8a8a93 : #6b6b74;
+    out property <color> line: dark ? #33333a : #e4e4e9;
+
+    out property <color> warning: #d99a2b;
+    out property <color> error: #d9534f;
+    out property <color> success: #4caf7d;
+
+    // 4px grid.
+    out property <length> gap: 8px;
+    out property <length> pad: 16px;
+    out property <length> radius-control: 4px;
+    out property <length> radius-card: 6px;
+
+    out property <length> size-base: 13px;
+    out property <length> size-muted: 11px;
+    out property <length> size-heading: 15px;
+}
+
+component Card inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius-card;
+    border-width: 1px;
+    border-color: Theme.line;
+}
+
+// Accent is reserved for interactive state and selection — never decoration (gui.md).
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    in property <bool> enabled-item: true;
+    callback clicked();
+
+    height: 32px;
+    border-radius: Theme.radius-control;
+    background: selected ? Theme.accent.with-alpha(0.16)
+              : touch.has-hover ? Theme.line.with-alpha(0.5)
+              : transparent;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: label;
+            vertical-alignment: center;
+            font-size: Theme.size-base;
+            // Medium for the selected item; the spec allows regular and medium only, so
+            // emphasis cannot reach for bold.
+            font-weight: selected ? 600 : 400;
+            color: root.enabled-item ? (selected ? Theme.accent : Theme.text) : Theme.muted;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled-item;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Button inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary;
+    in property <bool> danger;
+    callback clicked();
+
+    height: 30px;
+    border-radius: Theme.radius-control;
+    border-width: 1px;
+    border-color: danger ? Theme.error : (primary ? Theme.accent : Theme.line);
+    background: touch.pressed ? Theme.line
+              : (primary ? Theme.accent.with-alpha(touch.has-hover ? 0.28 : 0.18)
+                         : (touch.has-hover ? Theme.line.with-alpha(0.5) : transparent));
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: label;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-size: Theme.size-base;
+            color: danger ? Theme.error : (primary ? Theme.accent : Theme.text);
+        }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// One stage of the active pipeline. The strip is the answer to "is it actually doing
+// anything", which is the first question a user has and the hardest to answer otherwise.
+component PipelineStage inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: true;
+
+    height: 26px;
+    border-radius: Theme.radius-control;
+    border-width: 1px;
+    border-color: active ? Theme.accent.with-alpha(0.4) : Theme.line;
+    background: active ? Theme.accent.with-alpha(0.10) : transparent;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: label;
+            vertical-alignment: center;
+            // Monospace: these are config keys, and the spec puts keys in monospace so file
+            // knowledge and interface knowledge stay the same knowledge.
+            font-family: "monospace";
+            font-size: Theme.size-muted;
+            color: active ? Theme.text : Theme.muted;
+        }
+    }
+}
+
+// Inline in the flow, never a dismissible banner (gui.md) — a warning that can be swiped away
+// is a warning that will be, and these explain things that otherwise look like breakage.
+component NoticeCard inherits Card {
+    in property <string> title;
+    in property <string> body;
+    in property <color> tone: Theme.warning;
+    in property <string> action;
+    callback acted();
+
+    border-color: tone.with-alpha(0.5);
+    background: tone.with-alpha(0.08);
+
+    VerticalLayout {
+        padding: Theme.pad;
+        spacing: 4px;
+
+        Text {
+            text: title;
+            font-size: Theme.size-base;
+            font-weight: 600;
+            color: tone;
+        }
+        Text {
+            text: body;
+            font-size: Theme.size-muted;
+            color: Theme.text;
+            wrap: word-wrap;
+        }
+        if action != "": HorizontalLayout {
+            alignment: start;
+            padding-top: 4px;
+            Button {
+                label: action;
+                clicked => { root.acted(); }
+            }
+        }
+    }
+}
+
+struct ModeRow {
+    slot: int,
+    name: string,
+    output: string,
+    preset: string,
+}
+
+export component App inherits Window {
+    title: "StabMouse";
+    preferred-width: 1280px;
+    preferred-height: 860px;
+    min-width: 1000px;
+    min-height: 700px;
+    background: Theme.ground;
+
+    in property <bool> connected;
+    in property <string> profile;
+    in property <int> active-slot;
+    in property <string> mode-name;
+    in property <bool> enabled;
+    in property <bool> degraded;
+    in property <string> degraded-reason;
+    in property <int> tablets;
+    in property <bool> tablets-placed;
+    in property <string> version;
+    in property <[ModeRow]> modes;
+    in property <[string]> stages;
+
+    callback switch-to(int);
+    callback set-enabled(bool);
+    callback refresh();
+
+    HorizontalLayout {
+        // -------------------------------------------------------------- sidebar
+        Rectangle {
+            width: 200px;
+            background: Theme.surface;
+
+            VerticalLayout {
+                padding: Theme.gap;
+                spacing: 2px;
+
+                Text {
+                    text: "StabMouse";
+                    font-size: Theme.size-heading;
+                    font-weight: 600;
+                    color: Theme.text;
+                    height: 40px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                }
+
+                NavItem { label: "Dashboard"; selected: true; }
+                // Honest about what exists. A navigation item that opens nothing is worse
+                // than one that says it is not built yet.
+                NavItem { label: "Profiles"; enabled-item: false; }
+                NavItem { label: "Presets"; enabled-item: false; }
+                NavItem { label: "Devices"; enabled-item: false; }
+
+                Rectangle { vertical-stretch: 1; }
+
+                // Persistent status area in the sidebar footer (gui.md).
+                Rectangle { height: 1px; background: Theme.line; }
+                VerticalLayout {
+                    padding-top: Theme.gap;
+                    spacing: 2px;
+                    Text {
+                        text: connected ? "Daemon connected" : "No daemon";
+                        font-size: Theme.size-muted;
+                        color: connected ? Theme.success : Theme.error;
+                    }
+                    Text {
+                        text: connected ? "v" + version : "start it with stabmoused run";
+                        font-size: Theme.size-muted;
+                        color: Theme.muted;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        Rectangle { width: 1px; background: Theme.line; }
+
+        // ------------------------------------------------------------ dashboard
+        Rectangle {
+            background: Theme.ground;
+
+            VerticalLayout {
+                padding: Theme.pad;
+                spacing: Theme.pad;
+
+                HorizontalLayout {
+                    height: 32px;
+                    Text {
+                        text: "Dashboard";
+                        font-size: Theme.size-heading;
+                        font-weight: 600;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        label: "Refresh";
+                        clicked => { root.refresh(); }
+                    }
+                }
+
+                if !connected: NoticeCard {
+                    title: "No daemon is running";
+                    body: "StabMouse filters input from a background daemon. Start one with "
+                        + "`stabmoused run`, then press Refresh.";
+                    tone: Theme.error;
+                    action: "Refresh";
+                    acted => { root.refresh(); }
+                }
+
+                // A button label is a thin signal for "your mouse is no longer being
+                // filtered". Disabled is a state worth stating outright, in the flow, because
+                // the alternative is a user wondering why their curves stopped working.
+                if connected && !enabled: NoticeCard {
+                    title: "Filtering is off";
+                    body: "The grab is released, so the mouse behaves as it would without "
+                        + "StabMouse. Nothing is lost — modes and presets are untouched.";
+                    tone: Theme.warning;
+                    action: "Enable";
+                    acted => { root.set-enabled(true); }
+                }
+
+                if connected && degraded: NoticeCard {
+                    title: "Output is limited";
+                    body: degraded-reason;
+                    tone: Theme.warning;
+                }
+
+                if connected: Card {
+                    vertical-stretch: 0;
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: Theme.gap;
+
+                        HorizontalLayout {
+                            spacing: Theme.gap;
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: "Mode " + active-slot + " — " + mode-name;
+                                    font-size: Theme.size-heading;
+                                    color: Theme.text;
+                                }
+                                Text {
+                                    text: "profile: " + profile;
+                                    font-size: Theme.size-muted;
+                                    color: Theme.muted;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                label: enabled ? "Disable" : "Enable";
+                                danger: enabled;
+                                primary: !enabled;
+                                clicked => { root.set-enabled(!enabled); }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.line; }
+
+                        Text {
+                            text: "Pipeline";
+                            font-size: Theme.size-muted;
+                            color: Theme.muted;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for stage in stages: PipelineStage { label: stage; }
+                        }
+                    }
+                }
+
+                if connected: Card {
+                    vertical-stretch: 0;
+                    VerticalLayout {
+                        padding: Theme.pad;
+                        spacing: Theme.gap;
+
+                        Text {
+                            text: "Modes";
+                            font-size: Theme.size-muted;
+                            color: Theme.muted;
+                        }
+
+                        for mode in modes: Rectangle {
+                            height: 36px;
+                            border-radius: Theme.radius-control;
+                            background: mode.slot == active-slot
+                                ? Theme.accent.with-alpha(0.14)
+                                : (row-touch.has-hover ? Theme.line.with-alpha(0.4) : transparent);
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: Theme.gap;
+
+                                Text {
+                                    text: mode.slot;
+                                    width: 20px;
+                                    font-family: "monospace";
+                                    font-size: Theme.size-muted;
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: mode.name;
+                                    width: 140px;
+                                    font-size: Theme.size-base;
+                                    color: Theme.text;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: mode.output;
+                                    width: 90px;
+                                    font-family: "monospace";
+                                    font-size: Theme.size-muted;
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: mode.preset;
+                                    font-family: "monospace";
+                                    font-size: Theme.size-muted;
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+
+                            row-touch := TouchArea {
+                                clicked => { root.switch-to(mode.slot); }
+                            }
+                        }
+                    }
+                }
+
+                if connected && tablets > 0: Card {
+                    vertical-stretch: 0;
+                    HorizontalLayout {
+                        padding: Theme.pad;
+                        spacing: Theme.gap;
+                        Text {
+                            text: "Tablets";
+                            font-size: Theme.size-muted;
+                            color: Theme.muted;
+                            vertical-alignment: center;
+                            width: 80px;
+                        }
+                        Text {
+                            text: tablets + (tablets-placed
+                                ? " — one per screen, each confined to its own"
+                                : " — not confined to their screens");
+                            font-size: Theme.size-base;
+                            color: tablets-placed ? Theme.text : Theme.warning;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}
