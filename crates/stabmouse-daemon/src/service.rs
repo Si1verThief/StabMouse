@@ -235,6 +235,11 @@ impl Daemon {
         dispatch(Command::CaptureBinding)
     }
 
+    /// Stop watching, for a frontend that finished without a button being pressed.
+    fn cancel_binding_capture(&self) -> zbus::fdo::Result<()> {
+        dispatch(Command::CancelCapture)
+    }
+
     /// Collect a captured button name, if one has arrived. Empty while still waiting.
     ///
     /// Taken rather than read, so the same press cannot be bound twice by two callers or by

@@ -146,6 +146,11 @@ impl Client {
         self.call(DAEMON_INTERFACE, "CaptureBinding", &())
     }
 
+    /// Stop the daemon watching, for a capture that ended without a button.
+    pub fn cancel_binding_capture(&self) -> Result<()> {
+        self.call(DAEMON_INTERFACE, "CancelBindingCapture", &())
+    }
+
     /// Collect a captured button name, or empty while still waiting.
     pub fn take_captured_binding(&self) -> Result<String> {
         self.call(DAEMON_INTERFACE, "TakeCapturedBinding", &())

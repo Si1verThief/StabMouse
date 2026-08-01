@@ -392,11 +392,9 @@ pub const STAGES: &[StageSpec] = &[
                 "mode",
                 "Mode",
                 "drag",
-                &["drag", "grab", "joystick"],
-                "Drag pushes the page and freezes the cursor, like a finger on glass. Grab \
-                 holds a point on the page so it follows the pointer, like a PDF hand tool — \
-                 the cursor keeps moving, which is the whole difference. Joystick sets a \
-                 speed from how far you hold away from where you pressed.",
+                &["drag", "joystick"],
+                "Drag scrolls by how far you move. Joystick sets a speed from how far you \
+                 hold away from where you pressed, and keeps scrolling while you hold still.",
             ),
             bind("button", "Button", "What engages the gesture. BTN_MIDDLE is the familiar one."),
             f(
@@ -439,15 +437,26 @@ pub const STAGES: &[StageSpec] = &[
                 "mode",
                 "joystick",
             ),
-            when(
-                b(
-                    "latch",
-                    "Click to latch",
-                    false,
-                    "Click to start and click to stop, rather than holding throughout.",
-                ),
-                "mode",
-                "joystick",
+            b(
+                "latch",
+                "Click to latch",
+                false,
+                "Click to start and click to stop, rather than holding throughout.",
+            ),
+            b(
+                "freeze_cursor",
+                "Hold the cursor still",
+                true,
+                "On, a swipe: the cursor stays where it is, as a finger on glass has none to \
+                 move. Off, a hand tool: the page follows the pointer so the point under it \
+                 stays under it. Joystick ignores this — it needs the cursor to steer by.",
+            ),
+            b(
+                "passthrough",
+                "Button keeps its normal job",
+                false,
+                "By default a button bound here is consumed, so binding the middle button to \
+                 a gesture does not also paste. Turn this on to let it do both.",
             ),
             b(
                 "momentum",

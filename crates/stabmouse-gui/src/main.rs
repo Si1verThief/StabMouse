@@ -896,6 +896,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 if !ready {
                     if waited >= limit {
                         app.set_listening_for(Default::default());
+                        let _ = Client::connect().and_then(|c| c.cancel_binding_capture());
                         notice(&app, "nothing was pressed, so nothing was bound");
                     }
                     return;
@@ -908,6 +909,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 *chord.borrow_mut() = KeyChord::default();
                 app.set_listening_for(Default::default());
+                // The daemon is still watching unless told otherwise, and while it watches it
+                // swallows every mouse event — which reads as the mouse being stuck in
+                // binding mode after a keyboard-only chord.
+                if buttons.is_empty() {
+                    let _ = Client::connect().and_then(|c| c.cancel_binding_capture());
+                }
                 if parts.is_empty() {
                     notice(&app, "nothing was pressed, so nothing was bound");
                     return;
@@ -933,10 +940,13 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = app.as_weak();
+    let chord_for_cancel = chord.clone();
     app.on_cancel_listen(move || {
         if let Some(app) = weak.upgrade() {
             app.set_listening_for(Default::default());
             app.set_notice(Default::default());
+            *chord_for_cancel.borrow_mut() = KeyChord::default();
+            let _ = Client::connect().and_then(|c| c.cancel_binding_capture());
         }
     });
 

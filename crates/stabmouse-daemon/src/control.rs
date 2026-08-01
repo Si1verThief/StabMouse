@@ -75,6 +75,8 @@ pub enum Command {
     /// an exclusive grab, so those events reach nothing else. A window asking "press the button
     /// you want" has to ask the daemon to watch for it.
     CaptureBinding,
+    /// Stop capturing, for a frontend that finished without a button being pressed.
+    CancelCapture,
 }
 
 impl Command {
@@ -99,6 +101,7 @@ impl Command {
                 (!rest.is_empty()).then(|| Self::Profile(rest.to_string()))
             }
             "capture" => Some(Self::CaptureBinding),
+            "uncapture" => Some(Self::CancelCapture),
             "status" => Some(Self::Status),
             _ => None,
         }
@@ -117,6 +120,7 @@ impl Command {
             Self::Reload => "reload".into(),
             Self::Profile(name) => format!("profile {name}"),
             Self::CaptureBinding => "capture".into(),
+            Self::CancelCapture => "uncapture".into(),
         }
     }
 }

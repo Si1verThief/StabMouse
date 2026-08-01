@@ -6,15 +6,13 @@ use crate::stage::Stage;
 /// How held movement becomes scrolling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Touchscreen-style swipe: hand movement scrolls directly and the cursor is frozen, as
-    /// a finger on glass has no cursor to move.
-    Drag,
-    /// A hand tool: the cursor keeps moving and the page moves with it, so the point under
-    /// the cursor stays under the cursor. What dragging a PDF feels like.
+    /// Hand movement scrolls directly, one-to-one with distance.
     ///
-    /// Distinct from `Drag` in exactly one way that matters — the cursor is *not* frozen —
-    /// and that is the whole difference between pushing a surface and holding a point on it.
-    Grab,
+    /// With `freeze_cursor` this is a finger-on-glass swipe; without it, a hand tool holding
+    /// a point on the page so it follows the pointer. That was two modes until the only
+    /// difference between them turned out to be the one flag, and a mode that is a synonym
+    /// for a setting is a mode nobody can predict.
+    Drag,
     /// Middle-click autoscroll: displacement from where the button went down sets a scroll
     /// *velocity*, so a small sustained offset scrolls without more hand travel.
     Joystick,
@@ -57,8 +55,16 @@ pub struct Scroll {
     pub deadzone_mm: f64,
     /// Notches per second per millimetre of displacement beyond the deadzone.
     pub gain: f64,
-    /// `joystick`: click to start and click to stop, rather than holding throughout.
+    /// Click to start and click to stop, rather than holding throughout. Applies to every
+    /// mode: a swipe you do not have to keep holding is as reasonable as an autoscroll you
+    /// do not.
     pub latch: bool,
+    /// Hold the cursor still while the gesture runs.
+    ///
+    /// True is a swipe — a finger on glass has no cursor to move. False is a hand tool: the
+    /// page follows the pointer, so the point under it stays under it. Never applies to
+    /// `joystick`, which needs the cursor visible to steer by.
+    pub freeze_cursor: bool,
     /// Keep scrolling after a swipe is released, decaying from the speed it ended at.
     pub momentum: bool,
     /// Seconds for a flick to decay to about a third of its release speed.
@@ -106,6 +112,7 @@ impl Scroll {
             deadzone_mm: 2.0,
             gain: 1.5,
             latch: false,
+            freeze_cursor: true,
             momentum: false,
             // A flick that dies in a third of a second reads as a surface with weight rather
             // than as one that keeps going after the hand has moved on.
@@ -130,7 +137,7 @@ impl Scroll {
         let pressed = held && !self.was_held;
         self.was_held = held;
 
-        if self.mode == Mode::Joystick && self.latch {
+        if self.latch {
             // A press toggles. Releasing does nothing, which is what "click to start, click
             // to stop" means — and what lets the hand leave the button entirely mid-scroll.
             if pressed {
@@ -234,7 +241,7 @@ impl Stage for Scroll {
         let mut produced_y = 0.0;
 
         match self.mode {
-            Mode::Drag | Mode::Grab => {
+            Mode::Drag => {
                 let per_unit = if self.mm_per_unit.is_finite() && self.mm_per_unit > 0.0 {
                     self.mm_per_unit
                 } else {
@@ -288,9 +295,9 @@ impl Stage for Scroll {
         self.carry_x = 0.0;
         self.carry_y = 0.0;
 
-        // **Only `drag` takes the cursor.** `grab` moves the page *with* the pointer, so the
-        // point under it stays under it; `joystick` needs the cursor visible to steer by.
-        if self.mode == Mode::Drag {
+        // Joystick never freezes: displacement is the control, so a cursor that cannot be
+        // seen leaves no way to judge speed or find the way back to a stop.
+        if self.freeze_cursor && self.mode != Mode::Joystick {
             s.dx = 0.0;
             s.dy = 0.0;
         }
@@ -464,10 +471,11 @@ mod tests {
     }
 
     #[test]
-    fn grab_scrolls_without_taking_the_cursor() {
-        // The difference from drag, and the whole point of the mode: the page moves *with*
-        // the pointer, so what is under it stays under it.
-        let mut stage = Scroll::new(Mode::Grab);
+    fn an_unfrozen_drag_keeps_the_cursor_moving() {
+        // The hand-tool feel: the page moves *with* the pointer, so what is under it stays
+        // under it. One flag, where there used to be a whole second mode.
+        let mut stage = Scroll::new(Mode::Drag);
+        stage.freeze_cursor = false;
         let (_, sy, mx, my) = feed(&mut stage, &[(1.0, 2.0, true); 8]);
         assert!(sy != 0.0, "it must still scroll");
         assert!((mx - 8.0).abs() < 1e-9 && (my - 16.0).abs() < 1e-9, "cursor kept moving");
@@ -524,7 +532,7 @@ mod tests {
 
     #[test]
     fn nothing_panics_on_pathological_input() {
-        for mode in [Mode::Drag, Mode::Grab, Mode::Joystick] {
+        for mode in [Mode::Drag, Mode::Joystick] {
             let mut stage = Scroll::new(mode);
             stage.mm_per_unit = f64::NAN;
             stage.gain = f64::INFINITY;

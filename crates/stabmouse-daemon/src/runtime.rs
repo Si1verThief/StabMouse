@@ -381,8 +381,15 @@ impl Runtime {
                             self.requested_profile = Some(name);
                             reload_requested = true;
                         }
-                        Command::CaptureBinding => self.capture_until =
-                            Some(Instant::now() + CAPTURE_WINDOW),
+                        Command::CaptureBinding => {
+                            self.end_capture();
+                            self.capture_until = Some(Instant::now() + CAPTURE_WINDOW);
+                        }
+                        // A capture the frontend finished by other means — a keyboard-only
+                        // chord, or Escape. Without this the daemon went on swallowing every
+                        // mouse event until the window expired, which reads as the mouse
+                        // being stuck in binding mode.
+                        Command::CancelCapture => self.end_capture(),
                     }
                 }
             }
@@ -960,9 +967,10 @@ impl Runtime {
             return false;
         };
         if Instant::now() >= until {
-            self.capture_until = None;
-            self.capture_chord.clear();
-            self.capture_down = 0;
+            // A capture that timed out with a button still held would otherwise leave its
+            // release queued for swallowing indefinitely, and the next ordinary release of
+            // that button would be eaten instead.
+            self.end_capture();
             return false;
         }
         if report.keys.is_empty() {
@@ -1090,6 +1098,14 @@ impl Runtime {
         }
     }
 
+    /// Stop capturing and forget anything half-collected.
+    fn end_capture(&mut self) {
+        self.capture_until = None;
+        self.capture_chord.clear();
+        self.capture_down = 0;
+        self.swallow_release.clear();
+    }
+
     /// Whether a button is part of any gesture binding on the current mode.
     ///
     /// Only mouse buttons: a keyboard key is never emitted by this daemon, so there is
@@ -1105,11 +1121,12 @@ impl Runtime {
             return false;
         }
         self.modes.current().is_some_and(|m| {
-            m.scroll_button
-                .iter()
-                .chain(m.modifier.iter())
-                .flatten()
-                .any(|c| *c == code)
+            !m.pass_through
+                && m.scroll_button
+                    .iter()
+                    .chain(m.modifier.iter())
+                    .flatten()
+                    .any(|c| *c == code)
         })
     }
 
@@ -1144,22 +1161,21 @@ impl Runtime {
         }
         // The other half of swallowing a captured press: those releases belong to presses no
         // application ever saw, so passing them on would leave a button-up with no button-down.
+        //
+        // **Filtered out of the emission, never skipped as a report.** Skipping meant
+        // `track_button` never saw the release either, so the button stayed in `buttons_held`
+        // and the gesture it was bound to stayed engaged — which is exactly the "first use
+        // after binding behaves as though latch were on" that was reported. The state must
+        // always be tracked; only the *output* is suppressed.
+        let mut swallowed: Vec<u16> = Vec::new();
         if !self.swallow_release.is_empty() {
-            let mut swallowed_any = false;
             for (code, pressed) in &report.keys {
                 if !*pressed {
                     if let Some(i) = self.swallow_release.iter().position(|c| c == code) {
                         self.swallow_release.swap_remove(i);
-                        swallowed_any = true;
+                        swallowed.push(*code);
                     }
                 }
-            }
-            if swallowed_any
-                && report.dx == 0
-                && report.dy == 0
-                && report.other_relative.is_empty()
-            {
-                return Ok(());
             }
         }
 
@@ -1215,7 +1231,9 @@ impl Runtime {
         let keys: Vec<(u16, bool)> = report
             .keys
             .iter()
-            .filter(|(code, _)| !self.bound_to_gesture(*code))
+            .filter(|(code, pressed)| {
+                !self.bound_to_gesture(*code) && !(!*pressed && swallowed.contains(code))
+            })
             .copied()
             .collect();
 

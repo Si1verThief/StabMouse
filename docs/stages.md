@@ -288,7 +288,9 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 
 | Param | Type | Notes |
 |---|---|---|
-| `mode` | enum | `drag` (default) · `grab` · `joystick` |
+| `mode` | enum | `drag` (default) · `joystick` |
+| `freeze_cursor` | bool | Swipe (true) versus hand tool (false). Joystick ignores it |
+| `passthrough` | bool | Let the bound button keep its ordinary job as well |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
 | `drag.mm_per_unit` | f64 | Hand travel per scroll unit |
@@ -301,19 +303,25 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 losing its tuning; a second way to say the same thing reads as a setting that does
 something the user has not been told about. Removed after exactly that confusion.
 
-**A button bound to a gesture is consumed by it** and does not also do its ordinary job —
-otherwise binding the middle button to autoscroll also pastes, which reads as the gesture
-firing when it should not. The pen button is never consumed, since a preset that bound it
-would silently lose the ability to draw.
+**A button bound to a gesture is consumed by it** by default and does not also do its
+ordinary job — otherwise binding the middle button to autoscroll also pastes, which reads
+as the gesture firing when it should not. `passthrough` asks for both, which is worth
+having: middle-click paste alongside a middle-click gesture is a real thing to want. The
+pen button is never consumed either way, since a preset that bound it would silently lose
+the ability to draw.
 
 - **`drag`** — touchscreen-style swipe. While held, hand motion scrolls directly and
   the cursor is frozen, as a finger on glass has no cursor to move. **This is the only
   mode that freezes the cursor**, and it is the whole difference between it and `grab`.
-- **`grab`** — a hand tool. The cursor keeps moving and the page moves with it, so the
-  point under the cursor stays under it. `drag_mm_per_unit` is what decides whether the
-  page keeps pace, and it is a tuned figure rather than an exact one: the millimetre-to-
-  pixel mapping lives in the compositor and is not queryable from here (see the units
-  section).
+**`grab` was a separate mode and is now `freeze_cursor = false`.** The only difference
+between the two was that one flag, and a mode that is a synonym for a setting is a mode
+nobody can predict. Unfrozen, `drag_mm_per_unit` is what decides whether the page keeps
+pace with the pointer — a tuned figure rather than an exact one, since the millimetre-to-
+pixel mapping lives in the compositor and is not queryable from here (see the units
+section).
+
+**`latch` applies to every mode**, not only `joystick`. A swipe you do not have to keep
+holding is as reasonable as an autoscroll you do not.
 - **`joystick`** — middle-click autoscroll. Displacement from the press origin sets a
   continuous scroll *velocity*.
 

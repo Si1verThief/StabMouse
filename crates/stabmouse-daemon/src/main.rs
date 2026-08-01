@@ -760,6 +760,7 @@ fn build_modes(
             pipeline: stabmouse_core::Pipeline::new(vec![]),
             modifier: Vec::new(),
             scroll_button: Vec::new(),
+            pass_through: false,
         }];
     };
 
@@ -783,6 +784,7 @@ fn build_modes(
                 pipeline: stabmouse_core::Pipeline::new(vec![]),
                 modifier: Vec::new(),
                 scroll_button: Vec::new(),
+                pass_through: false,
             });
             continue;
         };
@@ -808,6 +810,10 @@ fn build_modes(
             pipeline: assembly.pipeline,
             modifier: stage_bindings(preset, &m.preset, "snap", "modifier"),
             scroll_button: stage_bindings(preset, &m.preset, "scroll", "button"),
+            // Consuming a bound button is the default, since a gesture that also pastes is
+            // not one gesture. A preset may ask for both.
+            pass_through: stage_flag(preset, "scroll", "passthrough")
+                || stage_flag(preset, "snap", "passthrough"),
         });
     }
     out
@@ -867,6 +873,17 @@ fn stage_bindings(
             (!codes.is_empty()).then_some(codes)
         })
         .collect()
+}
+
+/// A boolean a preset's stage carries, defaulting to false.
+fn stage_flag(preset: &stabmouse_config::Preset, stage: &str, param: &str) -> bool {
+    preset
+        .stages
+        .iter()
+        .find(|s| s.kind == stage)
+        .and_then(|s| s.params.get(param))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 struct Source {

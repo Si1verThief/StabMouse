@@ -195,7 +195,6 @@ fn build_scroll(p: &mut Params) -> Scroll {
     // silently swallowing motion the moment a button is pressed.
     let mode = match p.str("mode", "drag").as_str() {
         "drag" => ScrollMode::Drag,
-        "grab" => ScrollMode::Grab,
         "joystick" => ScrollMode::Joystick,
         other => {
             p.warn(format!("unknown scroll mode '{other}'; using drag"));
@@ -208,6 +207,10 @@ fn build_scroll(p: &mut Params) -> Scroll {
     scroll.deadzone_mm = p.f64("joystick_deadzone_mm", scroll.deadzone_mm);
     scroll.gain = p.f64("joystick_gain", scroll.gain);
     scroll.latch = p.bool("latch", scroll.latch);
+    scroll.freeze_cursor = p.bool("freeze_cursor", scroll.freeze_cursor);
+    // Read here so it is not reported as unknown; the daemon is what acts on it, since only
+    // the daemon decides what reaches a sink.
+    let _ = p.bool("passthrough", false);
     scroll.momentum = p.bool("momentum", scroll.momentum);
     scroll.momentum_decay_s = p.f64("momentum_decay_ms", scroll.momentum_decay_s * 1000.0) / 1000.0;
     // Resolved by the daemon, for the same reason `snap.modifier` is: turning a name into an
