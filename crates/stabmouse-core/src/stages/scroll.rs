@@ -263,7 +263,11 @@ impl Stage for Scroll {
                 } else {
                     1.0
                 };
-                let (v, h) = (s.wheel_v * gain, s.wheel_h * gain);
+                // `sign` applies here exactly as it does to a drag. It was computed and then
+                // not used, so inverting a wheel gesture silently did nothing — and since an
+                // uninverted wheel still scrolls, the setting looked like it was being
+                // ignored rather than like the mode was inert.
+                let (v, h) = (s.wheel_v * gain * sign, s.wheel_h * gain * sign);
                 s.wheel_v = 0.0;
                 s.wheel_h = 0.0;
                 s.scroll_y += v;
@@ -713,6 +717,21 @@ mod tests {
         let mut held = wheel_sample(true);
         stage.process(&mut held);
         assert_eq!((held.wheel_v, held.wheel_h), (0.0, 0.0), "held must take it");
+    }
+
+    #[test]
+    fn invert_flips_the_wheel_too() {
+        // It did not, for as long as `wheel` existed: `sign` was computed and then never
+        // reached the one branch that needed it. An uninverted wheel still scrolls, so the
+        // symptom was "invert is ignored" rather than "the mode is doing nothing" — which is
+        // the kind of half-working that sends you looking in the wrong place.
+        let mut stage = Scroll::new(Mode::Wheel);
+        stage.always_active = true;
+        stage.invert = true;
+        let mut s = wheel_sample(false);
+        stage.process(&mut s);
+        assert_eq!(s.scroll_y, -3.0, "inverted, the wheel must go the other way");
+        assert_eq!(s.scroll_x, 2.0, "and so must the horizontal wheel");
     }
 
     #[test]

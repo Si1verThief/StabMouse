@@ -809,6 +809,9 @@ fn build_modes(
                 names.join(" -> ")
             );
         }
+        if let Some(line) = scroll_summary(preset, &m.preset) {
+            println!("  mode '{}' {line}", m.name);
+        }
         out.push(Mode {
             name: m.name.clone(),
             output: m.output,
@@ -879,11 +882,6 @@ fn stage_bindings(
         .collect()
 }
 
-/// What the preset asks to happen to bound mouse buttons.
-///
-/// Read across every stage that binds one, taking the most permissive answer: a preset that
-/// says "always" anywhere means the user has asked for a button back, and quietly overruling
-/// that from another stage would be the surprise this setting exists to avoid.
 /// Whether this preset's scroll gesture is the one that consumes the wheel.
 ///
 /// Read here rather than from the assembled pipeline because it decides what the *daemon*
@@ -893,6 +891,38 @@ fn scroll_uses_wheel(preset: &stabmouse_config::Preset) -> bool {
     preset.stages.iter().any(|s| {
         s.kind == "scroll" && s.params.get("mode").and_then(|v| v.as_str()) == Some("wheel")
     })
+}
+
+/// One line saying what this preset's scroll gesture actually resolved to.
+///
+/// Printed unconditionally, for the same reason the transport line is: **behaviour alone
+/// cannot distinguish the failure modes here.** "The wheel still scrolls" is equally the
+/// symptom of a gesture that is not engaging, a binding that did not resolve, a mode that
+/// does not claim the wheel, and a preset that is not the one running — and every one of
+/// those has already cost a round trip of guessing. The mode is on the line because
+/// `mouse_passthrough` governs the wheel only in `wheel` mode, which is invisible from the
+/// setting itself.
+fn scroll_summary(preset: &stabmouse_config::Preset, slug: &str) -> Option<String> {
+    let stage = preset.stages.iter().find(|s| s.kind == "scroll")?;
+    let mode = stage.params.get("mode").and_then(|v| v.as_str()).unwrap_or("drag");
+    let bound = stage_bindings(preset, slug, "scroll", "button");
+    let binding = match stage.params.get("button") {
+        None => "unbound".to_string(),
+        Some(_) if bound.is_empty() => "bound to a name that did not resolve".to_string(),
+        Some(v) => format!("on {}", v.as_str().unwrap_or("a binding")),
+    };
+    let always = stage.params.get("always_active").and_then(|v| v.as_bool()) == Some(true);
+    let claim = match (mode == "wheel", always || !bound.is_empty()) {
+        (false, _) => "does not touch the wheel".to_string(),
+        (true, false) => "claims nothing: unbound and always_active off".to_string(),
+        (true, true) => format!(
+            "claims the wheel, passthrough {:?}",
+            stage_passthrough(preset)
+        )
+        .to_lowercase(),
+    };
+    let off = if stage.enabled { "" } else { " [DISABLED]" };
+    Some(format!("scroll: {mode}, {binding} — {claim}{off}"))
 }
 
 fn stage_passthrough(preset: &stabmouse_config::Preset) -> stabmouse_config::Passthrough {
