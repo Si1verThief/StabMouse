@@ -62,13 +62,22 @@ pub struct Scroll {
     /// Hold the cursor still while the gesture runs.
     ///
     /// True is a swipe — a finger on glass has no cursor to move. False is a hand tool: the
-    /// page follows the pointer, so the point under it stays under it. Never applies to
-    /// `joystick`, which needs the cursor visible to steer by.
+    /// page follows the pointer, so the point under it stays under it.
+    ///
+    /// **Honoured by every mode, including `joystick`.** A frozen joystick is harder to steer,
+    /// since displacement is the control and there is then nothing on screen showing it — but
+    /// that is the user's trade to make, not this stage's to refuse.
     pub freeze_cursor: bool,
     /// Keep scrolling after a swipe is released, decaying from the speed it ended at.
     pub momentum: bool,
     /// Seconds for a flick to decay to about a third of its release speed.
     pub momentum_decay_s: f64,
+    /// With a chord binding, letting go of *everything* ends the glide.
+    ///
+    /// Releasing one part of the chord leaves the page coasting; releasing the rest stops it
+    /// dead. That gives a flick a brake without needing a second binding for it, and it only
+    /// means anything for a chord — with one button there is no halfway.
+    pub full_release_stops_momentum: bool,
 
     /// Displacement from the press origin, millimetres.
     offset_x: f64,
@@ -117,6 +126,7 @@ impl Scroll {
             // A flick that dies in a third of a second reads as a surface with weight rather
             // than as one that keeps going after the hand has moved on.
             momentum_decay_s: 0.35,
+            full_release_stops_momentum: false,
             offset_x: 0.0,
             offset_y: 0.0,
             carry_x: 0.0,
@@ -212,11 +222,20 @@ impl Stage for Scroll {
         let active = self.engaged(s.scrolling);
 
         if !active {
+            // Letting go of the whole chord is a brake. Checked before the glide runs, so a
+            // full release stops the page on the same sample rather than a frame later.
+            if self.full_release_stops_momentum && !s.scroll_partial {
+                self.glide_x = 0.0;
+                self.glide_y = 0.0;
+            }
             if self.was_active {
                 self.was_active = false;
                 // A flick hands its speed to the glide; a slow finish hands over nothing,
                 // which is what stops a careful drag from drifting after the hand stops.
-                if self.momentum && self.mode != Mode::Joystick {
+                if self.momentum
+                    && self.mode != Mode::Joystick
+                    && !(self.full_release_stops_momentum && !s.scroll_partial)
+                {
                     self.glide_x = self.rate_x;
                     self.glide_y = self.rate_y;
                 } else {
@@ -295,9 +314,7 @@ impl Stage for Scroll {
         self.carry_x = 0.0;
         self.carry_y = 0.0;
 
-        // Joystick never freezes: displacement is the control, so a cursor that cannot be
-        // seen leaves no way to judge speed or find the way back to a stop.
-        if self.freeze_cursor && self.mode != Mode::Joystick {
+        if self.freeze_cursor {
             s.dx = 0.0;
             s.dy = 0.0;
         }
@@ -482,12 +499,54 @@ mod tests {
     }
 
     #[test]
-    fn joystick_leaves_the_cursor_free_to_steer_with() {
-        // Freezing it made the gesture unusable: displacement is the control, so with no
-        // cursor there is no way to judge speed or find the way back to a stop.
-        let mut stage = Scroll::new(Mode::Joystick);
-        let (_, _, mx, my) = feed(&mut stage, &[(0.5, 0.5, true); 10]);
-        assert!((mx - 5.0).abs() < 1e-9 && (my - 5.0).abs() < 1e-9);
+    fn joystick_honours_the_cursor_setting_in_both_directions() {
+        // It used to override the setting, on the reasoning that a frozen joystick cannot be
+        // steered. That is a real cost but it is the user's to weigh — a mode that quietly
+        // ignores a switch is worse than one that lets you make a hard choice.
+        let mut free = Scroll::new(Mode::Joystick);
+        free.freeze_cursor = false;
+        let (_, _, mx, my) = feed(&mut free, &[(0.5, 0.5, true); 10]);
+        assert!((mx - 5.0).abs() < 1e-9 && (my - 5.0).abs() < 1e-9, "free: ({mx}, {my})");
+
+        let mut frozen = Scroll::new(Mode::Joystick);
+        frozen.freeze_cursor = true;
+        let (_, _, mx, my) = feed(&mut frozen, &[(0.5, 0.5, true); 10]);
+        assert_eq!((mx, my), (0.0, 0.0), "frozen must hold the cursor");
+    }
+
+    #[test]
+    fn a_chord_can_coast_on_a_partial_release_and_stop_on_a_full_one() {
+        // The brake, on the same binding rather than a second one to find.
+        fn run(full_release: bool, still_partly_held: bool) -> f64 {
+            let mut stage = Scroll::new(Mode::Drag);
+            stage.momentum = true;
+            stage.full_release_stops_momentum = full_release;
+
+            let mut scrolled = 0.0;
+            // A flick, with the whole chord down.
+            for i in 0..12 {
+                let mut s = Sample::new(0.0, 3.0, (i + 1) * 1000, false);
+                s.dt = 0.001;
+                s.scrolling = true;
+                s.scroll_partial = true;
+                stage.process(&mut s);
+            }
+            // Then let go of the gesture, keeping (or not) a part of the chord held.
+            for i in 0..40 {
+                let mut s = Sample::new(0.0, 0.0, (i + 100) * 1000, false);
+                s.dt = 0.001;
+                s.scrolling = false;
+                s.scroll_partial = still_partly_held;
+                stage.process(&mut s);
+                scrolled += s.scroll_y;
+            }
+            scrolled.abs()
+        }
+
+        assert!(run(true, true) > 0.0, "one part still held must keep it coasting");
+        assert_eq!(run(true, false), 0.0, "letting go of everything must stop it dead");
+        // With the option off, a release coasts either way — the old behaviour is intact.
+        assert!(run(false, false) > 0.0);
     }
 
     #[test]

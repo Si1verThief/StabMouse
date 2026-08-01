@@ -289,7 +289,8 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | Param | Type | Notes |
 |---|---|---|
 | `mode` | enum | `drag` (default) · `joystick` |
-| `freeze_cursor` | bool | Swipe (true) versus hand tool (false). Joystick ignores it |
+| `freeze_cursor` | bool | Swipe (true) versus hand tool (false). Every mode honours it |
+| `full_release_stops_momentum` | bool | Chord bindings only — see below |
 | `passthrough` | bool | Let the bound button keep its ordinary job as well |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
@@ -325,11 +326,20 @@ holding is as reasonable as an autoscroll you do not.
 - **`joystick`** — middle-click autoscroll. Displacement from the press origin sets a
   continuous scroll *velocity*.
 
-**Correction: `joystick` does not freeze the cursor**, though this document said it did.
-Freezing it made the gesture unusable in practice — displacement is the control, so with
-no cursor to see there is no way to judge the speed or to find the way back to a stop, and
-it reads as the scroll having locked up. Every autoscroll worth copying leaves the cursor
-free for exactly this reason. Reported from use, 2026-08-01.
+**Correction: the cursor is not frozen by default in `joystick`**, though this document
+originally said it always was. Freezing it makes the gesture much harder to use —
+displacement is the control, so with no cursor to see there is no way to judge speed or
+find the way back to a stop, and it reads as the scroll having locked up.
+
+But that is a cost for the user to weigh, not for the stage to refuse: **`freeze_cursor` is
+honoured by every mode**, joystick included. A mode that quietly ignores a switch is worse
+than one that lets you make a hard choice — and an on-screen indicator would make a frozen
+joystick perfectly steerable.
+
+**`full_release_stops_momentum`** gives a flick a brake without a second binding. With a
+chord — `KEY_LEFTALT+BTN_MIDDLE` — holding both steers, releasing one leaves the page
+coasting, and releasing the rest stops it dead. Offered only for chords, because with a
+single button there is no halfway state for it to read.
 
 **Momentum** (`momentum`, `momentum_decay_ms`) carries a released flick onward, decaying
 exponentially, so a long page feels like a surface with weight rather than a crank. Off by

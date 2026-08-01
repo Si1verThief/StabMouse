@@ -1041,12 +1041,23 @@ impl Runtime {
         }
     }
 
-    /// Whether any of the current mode's scroll-gesture buttons is held.
+    /// Whether a whole scroll chord is held.
     fn scroll_held(&self) -> bool {
         match self.modes.current() {
             Some(mode) => self.any_held(&mode.scroll_button),
             None => false,
         }
+    }
+
+    /// Whether *any* part of a scroll binding is held.
+    ///
+    /// The halfway state of a chord: enough for a page to keep coasting, not enough to be
+    /// steering it. Equal to `scroll_held` for a single-button binding, which is why the
+    /// option that reads it is offered only for chords.
+    fn scroll_partly_held(&self) -> bool {
+        self.modes.current().is_some_and(|m| {
+            m.scroll_button.iter().flatten().any(|c| self.code_held(*c))
+        })
     }
 
     /// Reopen the keyboards, so a binding added since startup is actually watched.
@@ -1240,6 +1251,7 @@ impl Runtime {
         // Read before the mutable borrow of the mode below.
         let constrain = self.constrain_held();
         let scrolling = self.scroll_held();
+        let scroll_partial = self.scroll_partly_held();
 
         let Some(mode) = self.modes.current_mut() else {
             return Ok(());
@@ -1253,6 +1265,7 @@ impl Runtime {
         );
         sample.constrain = constrain;
         sample.scrolling = scrolling;
+        sample.scroll_partial = scroll_partial;
         mode.pipeline.process(&mut sample);
 
         // The `scroll` stage turns held motion into scroll and consumes the motion, so a

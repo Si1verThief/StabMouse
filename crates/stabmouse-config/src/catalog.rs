@@ -59,6 +59,12 @@ pub struct ParamSpec {
     /// settings under `mode`, the curve settings under `curve_type`. An editor may fold these
     /// away; nothing depends on it doing so.
     pub depends_on: Option<(&'static str, &'static str)>,
+    /// Parameters that only mean anything when the named binding holds a *chord*.
+    ///
+    /// A halfway state needs more than one part to be halfway through; with a single button
+    /// there is nothing between held and released, so offering the setting would be offering
+    /// one that cannot do what it says.
+    pub needs_chord: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,11 +96,17 @@ const fn f(
         help,
         kind: ParamKind::Float { default, soft_min, soft_max, decimals },
         depends_on: None,
+        needs_chord: None,
     }
 }
 
 const fn when(spec: ParamSpec, param: &'static str, value: &'static str) -> ParamSpec {
     ParamSpec { depends_on: Some((param, value)), ..spec }
+}
+
+/// Only meaningful when `binding` holds a chord rather than a single button.
+const fn when_chord(spec: ParamSpec, binding: &'static str) -> ParamSpec {
+    ParamSpec { needs_chord: Some(binding), ..spec }
 }
 
 const fn b(key: &'static str, label: &'static str, default: bool, help: &'static str) -> ParamSpec {
@@ -105,6 +117,7 @@ const fn b(key: &'static str, label: &'static str, default: bool, help: &'static
         help,
         kind: ParamKind::Bool { default },
         depends_on: None,
+        needs_chord: None,
     }
 }
 
@@ -122,11 +135,20 @@ const fn c(
         help,
         kind: ParamKind::Choice { default, options },
         depends_on: None,
+        needs_chord: None,
     }
 }
 
 const fn bind(key: &'static str, label: &'static str, help: &'static str) -> ParamSpec {
-    ParamSpec { key, label, unit: "", help, kind: ParamKind::Binding, depends_on: None }
+    ParamSpec {
+        key,
+        label,
+        unit: "",
+        help,
+        kind: ParamKind::Binding,
+        depends_on: None,
+        needs_chord: None,
+    }
 }
 
 pub const STAGES: &[StageSpec] = &[
@@ -404,7 +426,8 @@ pub const STAGES: &[StageSpec] = &[
                 "By default a button bound here is consumed, so binding the middle button to \
                  a gesture does not also paste. Turn this on to let it do both.",
             ),
-            f(
+            when(
+                f(
                 "drag_mm_per_unit",
                 "Distance per notch",
                 "mm",
@@ -416,6 +439,9 @@ pub const STAGES: &[StageSpec] = &[
                  unfrozen this is what decides whether the page keeps pace with the pointer. \
                  The slider stops at 0.5 because below that a hand's width is already pages; \
                  the field still takes anything, and small values do work.",
+                ),
+                "mode",
+                "drag",
             ),
             b("drag_invert", "Invert", false, ""),
             when(
@@ -460,23 +486,41 @@ pub const STAGES: &[StageSpec] = &[
                  move. Off, a hand tool: the page follows the pointer so the point under it \
                  stays under it. Joystick ignores this — it needs the cursor to steer by.",
             ),
-            b(
-                "momentum",
-                "Momentum",
-                false,
-                "Keep scrolling after a flick, decaying — a long page then feels like a \
-                 surface with weight rather than a crank. Ignored by joystick, which has no \
-                 release to carry from.",
+            when(
+                b(
+                    "momentum",
+                    "Momentum",
+                    false,
+                    "Keep scrolling after a flick, decaying — a long page then feels like a \
+                     surface with weight rather than a crank.",
+                ),
+                "mode",
+                "drag",
             ),
-            f(
-                "momentum_decay_ms",
-                "Momentum decay",
-                "ms",
-                350.0,
-                100.0,
-                1500.0,
-                0,
-                "How long a flick takes to fade to about a third of its release speed.",
+            when(
+                f(
+                    "momentum_decay_ms",
+                    "Momentum decay",
+                    "ms",
+                    350.0,
+                    100.0,
+                    1500.0,
+                    0,
+                    "How long a flick takes to fade to about a third of its release speed.",
+                ),
+                "mode",
+                "drag",
+            ),
+            when_chord(
+                b(
+                    "full_release_stops_momentum",
+                    "Full release stops momentum",
+                    false,
+                    "With a chord, letting go of one part leaves the page coasting and letting \
+                     go of the rest stops it dead — a brake on the same binding, with no \
+                     second one to find.",
+                ),
+                "button",
             ),
         ],
     },
@@ -687,6 +731,24 @@ mod tests {
                         p.key
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_chord_dependency_names_a_binding_on_the_same_stage() {
+        // Pointing at a parameter that is not a binding would hide a control on a condition
+        // that can never be true.
+        for spec in STAGES {
+            for p in spec.params {
+                let Some(on) = p.needs_chord else { continue };
+                let target = spec.params.iter().find(|q| q.key == on);
+                assert!(
+                    target.is_some_and(|q| matches!(q.kind, ParamKind::Binding)),
+                    "{}.{} depends on '{on}' being a chord, which is not a binding",
+                    spec.kind,
+                    p.key
+                );
             }
         }
     }

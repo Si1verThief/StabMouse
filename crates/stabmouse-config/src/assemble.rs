@@ -208,6 +208,8 @@ fn build_scroll(p: &mut Params) -> Scroll {
     scroll.gain = p.f64("joystick_gain", scroll.gain);
     scroll.latch = p.bool("latch", scroll.latch);
     scroll.freeze_cursor = p.bool("freeze_cursor", scroll.freeze_cursor);
+    scroll.full_release_stops_momentum =
+        p.bool("full_release_stops_momentum", scroll.full_release_stops_momentum);
     // Read here so it is not reported as unknown; the daemon is what acts on it, since only
     // the daemon decides what reaches a sink.
     let _ = p.bool("passthrough", false);

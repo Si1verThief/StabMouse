@@ -263,6 +263,21 @@ fn apply_presets(app: &App, selected: usize) {
                             continue;
                         }
                     }
+                    // A halfway state needs more than one part to be halfway through, so a
+                    // setting that depends on one is offered only where it can act.
+                    if let Some(binding) = p.needs_chord {
+                        let chorded = stage
+                            .params
+                            .iter()
+                            .find(|q| q.key == binding)
+                            .map(|q| presets::binding_names(&q.raw))
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|entry| entry.contains('+'));
+                        if !chorded {
+                            continue;
+                        }
+                    }
                     let stored = stage.params.iter().find(|q| q.key == p.key);
                     let mut row = EditorRow {
                         stage_index: index as i32,

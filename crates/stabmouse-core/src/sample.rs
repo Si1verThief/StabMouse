@@ -42,6 +42,13 @@ pub struct Sample {
     /// device would make replay diverge from live.
     pub scrolling: bool,
 
+    /// Whether *any* part of the scroll binding is still held.
+    ///
+    /// Only differs from `scrolling` for a chord: all parts down engages the gesture, some
+    /// parts down is a hand halfway off it. That middle state is what lets a chord say "let
+    /// go of one and it coasts, let go of both and it stops".
+    pub scroll_partial: bool,
+
     /// Scroll the pipeline decided to produce, in wheel notches, positive up and right.
     ///
     /// An **output** of the `scroll` stage rather than an input. The core cannot emit events
@@ -90,6 +97,7 @@ impl Sample {
             stroke_start: false,
             stroke_end: false,
             scrolling: false,
+            scroll_partial: false,
             scroll_x: 0.0,
             scroll_y: 0.0,
             constrain: false,
