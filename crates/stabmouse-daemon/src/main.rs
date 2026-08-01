@@ -538,6 +538,40 @@ fn run(
         }
     }
 
+    // A keyboard is opened only if some mode actually binds a keyboard key — a mouse-button
+    // modifier needs nothing here, and not opening a keyboard is the strongest guarantee
+    // available that keystrokes are not being read. See stabmouse-input's listen module.
+    let keyboard_codes: Vec<u16> = modes
+        .slots()
+        .iter()
+        .filter_map(|m| m.modifier)
+        .filter(|c| !stabmouse_input::is_mouse_button(*c))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let listener = if keyboard_codes.is_empty() {
+        None
+    } else {
+        match stabmouse_input::Listener::watching(&keyboard_codes) {
+            Ok(l) => {
+                // Named out loud, every run. A daemon that has opened a keyboard should say so
+                // without being asked, whatever it promises to do with it.
+                println!(
+                    "  constrain modifier: watching {} keyboard(s) for {} key(s), read-only, \
+                     never grabbed",
+                    l.raw_fds().len(),
+                    keyboard_codes.len()
+                );
+                Some(l)
+            }
+            Err(e) => {
+                eprintln!("  constrain modifier: {e}");
+                None
+            }
+        }
+    };
+
     // Started before the loop, so the very first iteration is already covered.
     let beat = watchdog::start(watchdog);
 
@@ -557,6 +591,8 @@ fn run(
         emitted_motion: false,
         last_emit: std::time::Instant::now(),
         beat,
+        listener,
+        buttons_held: Vec::new(),
         last_tablet_xy: (-1, -1),
         published,
         focus,
@@ -641,6 +677,7 @@ fn build_modes(
             output: stabmouse_config::Output::Mouse,
             preset: stabmouse_config::RAW.into(),
             pipeline: stabmouse_core::Pipeline::new(vec![]),
+            modifier: None,
         }];
     };
 
@@ -662,6 +699,7 @@ fn build_modes(
                 output: m.output,
                 preset: m.preset.clone(),
                 pipeline: stabmouse_core::Pipeline::new(vec![]),
+                modifier: None,
             });
             continue;
         };
@@ -685,9 +723,27 @@ fn build_modes(
             output: m.output,
             preset: m.preset.clone(),
             pipeline: assembly.pipeline,
+            modifier: snap_modifier(preset, &m.preset),
         });
     }
     out
+}
+
+/// The constrain modifier a preset's `snap` stage binds, if any.
+///
+/// Read from the raw preset rather than from the assembled pipeline: resolving a name to an
+/// evdev code is platform work, and `stabmouse-config` builds for wasm and PyO3 where no such
+/// table exists. The stage knows *whether* it waits for a modifier; the daemon knows *which*.
+fn snap_modifier(preset: &stabmouse_config::Preset, slug: &str) -> Option<u16> {
+    let entry = preset.stages.iter().find(|s| s.kind == "snap")?;
+    let name = entry.params.get("modifier")?.as_str()?;
+    match stabmouse_input::code_for(name) {
+        Some(code) => Some(code),
+        None => {
+            eprintln!("preset '{slug}': '{name}' is not a key or button name; snap will not engage");
+            None
+        }
+    }
 }
 
 struct Source {

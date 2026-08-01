@@ -9,6 +9,7 @@ mod normalize;
 mod pressure;
 mod rotate;
 mod sensitivity;
+mod snap;
 mod smooth;
 mod stabilize;
 
@@ -18,5 +19,6 @@ pub use normalize::Normalize;
 pub use pressure::{Pressure, SpeedSource, StallBehaviour};
 pub use rotate::Rotate;
 pub use sensitivity::{Curve, Sensitivity};
+pub use snap::{Constraint, Snap};
 pub use smooth::Smooth;
 pub use stabilize::Stabilize;

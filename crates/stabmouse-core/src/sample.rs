@@ -36,6 +36,14 @@ pub struct Sample {
     /// True on the sample where the press ended.
     pub stroke_end: bool,
 
+    /// Whether the user is holding the constrain modifier.
+    ///
+    /// Arrives on the sample rather than being read from a device, for the same reason time
+    /// does: a stage that queried the world would make replay diverge from live. The daemon
+    /// resolves the binding — a mouse button it can already see, or a keyboard key it watches
+    /// without grabbing — and states the answer here.
+    pub constrain: bool,
+
     /// Set when the gap since the previous sample was long enough that filter state
     /// should be treated as stale — suspend/resume, or a device reconnect. Stages
     /// must reset their internal state when they see it.
@@ -64,6 +72,7 @@ impl Sample {
             down,
             stroke_start: false,
             stroke_end: false,
+            constrain: false,
             discontinuity: false,
             pressure: None,
             speed_mm_s: None,

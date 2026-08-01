@@ -241,15 +241,39 @@ line, `stabilize` reshapes the line entirely.
 
 | Param | Type | Notes |
 |---|---|---|
-| `constraint` | enum | `angle` · `line` |
-| `divisions` | int | For `angle`; 8 = 45° |
-| `tolerance_deg` | f64 | |
+| `constraint` | enum | `angle` (default) · `line` |
+| `divisions` | int | For `angle`; 4 = axis lock, 8 = 45° |
+| `tolerance_deg` | f64 | Defaults to half a division, so a lock locks |
 | `strength` | f64 | 0–1; soft snap rather than hard lock |
 | `activation` | enum | `modifier` (default) · `always` |
+| `modifier` | binding | Key or button that engages it — `BTN_SIDE`, `KEY_LEFTSHIFT` |
 
-Modifier-held by default, the way Photoshop's shift-constrain works.
+Modifier-held by default, the way Photoshop's shift-constrain works. **The binding may be
+a mouse button or a keyboard key**, chosen per mode — see D24 for what each costs.
 
 `axis_lock` is absorbed here — it is `angle` with `divisions = 4`.
+
+**Projection, not distance.** The constrained position is the perpendicular projection of
+the hand's travel onto the allowed direction, which is what every drawing application
+means by constrain. Preserving distance along the direction instead would make a wobbling
+hand *overshoot*, converting noise across the line into length along it.
+
+**`tolerance_deg` is what makes a snap soft.** Beyond it the constraint declines to act, so
+a narrow tolerance is a magnet that bites near an axis and a wide one is a cage. The
+default is half a division — every direction then belongs to some allowed one, and axis
+lock behaves as a lock rather than as an occasional nudge.
+
+**Releasing never moves the cursor.** Motion discarded perpendicular to the constraint stays
+discarded: on release the stage re-anchors to where the output actually is, rather than
+owing back the difference and springing to where an unconstrained hand would have been.
+
+**Motion is deliberately not conserved here**, unlike every other position stage. Discarding
+the perpendicular component is the entire feature — `deadzone` has the same character. The
+core's conservation invariant is about the subpixel carry never silently losing slow motion,
+which is a different claim.
+
+`line` takes its direction from the first 1.5mm of the constrained segment rather than from
+the first sample, which is mostly sensor noise.
 
 > **Build for extension.** Ellipse and perspective constraints are explicitly
 > planned as one of the first post-v1 additions. The constraint type must be a

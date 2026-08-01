@@ -945,3 +945,55 @@ the wrong-window hazard of evaluating `windowAt` against a stale cursor. **What 
 does not:** pressure over non-pen windows (physics, not policy), and the hover-wheel
 cost over pen windows (D21) — still waiting on hover-on-pointer / pen-on-stroke,
 which this design is one step closer to.
+
+---
+
+## D24 — A modifier may be a mouse button or a keyboard key, and the keyboard is only ever *listened* to
+
+**Decision:** `snap`'s constrain modifier is bound per mode to either a mouse button or
+a keyboard key. A mouse button is read from the device already grabbed. A keyboard key
+is read from an **ungrabbed, read-only** listener that opens a keyboard only when some
+mode actually binds one.
+
+**Why the question arose.** The stage spec asks for modifier-held activation — Photoshop's
+shift-constrain — and nothing in the existing architecture could deliver it. Hotkeys are
+KGlobalAccel global shortcuts (D19, interaction.md), which fire on press and cannot express
+"while held"; and the project's first working rule is that **the keyboard is never grabbed**,
+because a daemon that dies holding both the mouse and the keyboard leaves no way out.
+
+**Reading is not grabbing, and the distinction is the whole decision.** An `EVIOCGRAB`
+takes a device away from everyone else — that is what makes grabbing the keyboard
+unrecoverable. An ungrabbed reader sees events that are *also* delivered normally, takes
+nothing, and vanishes when its fd closes. The working rule is about grabbing, and it is
+untouched here.
+
+**But a process reading a keyboard is keylogger-shaped whatever its intent**, so the
+capability is built to be unable to do more than it claims:
+
+- **Opt-in and absent by default.** No binding, no keyboard opened. The strongest
+  guarantee available is the file that was never opened.
+- **Only the bound codes are recorded**, one pressed/not-pressed bit each. Every other
+  event is discarded at the comparison and never reaches a variable, a counter or a log.
+- **No history of any kind** — no buffer, no timestamps, no sequence. Only "is this one
+  key down now", which is the entire question a modifier asks.
+- **Opened read-only**, so the descriptor cannot write to the device or take it.
+- **Announced at every startup**, naming how many keyboards are being watched. A daemon
+  that has opened a keyboard should say so without being asked.
+
+**The mouse-button path needs none of this**, which is why it is worth keeping as a
+first-class option rather than a fallback: the grabbed device's buttons are already in
+front of us, so a side-button binding adds no capability at all. Users with a spare side
+button should prefer it, and the config's example uses one.
+
+**Consequences:**
+
+- The binding is resolved to an evdev code **once at mode build time**. A name-to-code
+  lookup is a string comparison against the whole evdev table and has no business on the
+  hot path.
+- Every keyboard carrying the bound key is watched, not just one: laptops have a built-in
+  keyboard and an external one, and a modifier must work from whichever was pressed.
+- The modifier state reaches the filter **on the sample**, exactly as time does. A stage
+  that queried the world would make replay diverge from live and turn the research harness
+  into a lie (see the core's contract).
+- A mode that binds nothing is simply never constrained, so `activation = "modifier"` with
+  no binding is inert rather than stuck on.

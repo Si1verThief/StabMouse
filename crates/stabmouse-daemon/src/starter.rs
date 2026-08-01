@@ -177,6 +177,18 @@ default_mode = 1
 # The cost: anything launched while the tablet is absent gets no pressure until restarted.
 # destroy_tablet_on_leave = true
 
+# A drawing preset can constrain strokes to straight lines while a modifier is held — add a
+# snap stage to a preset and bind it:
+#
+#   [[stage]]
+#   type = "snap"
+#   divisions = 8            # 4 locks to the axes, 8 adds the diagonals
+#   modifier = "BTN_SIDE"    # a spare mouse button, or a key like "KEY_LEFTSHIFT"
+#
+# A mouse button costs nothing extra — those events already arrive on the grabbed mouse. A
+# keyboard key makes the daemon open your keyboard read-only to watch that one key; it never
+# grabs it and records nothing else, and it says so at startup. See decision D24.
+
 # Switch mode automatically on entering an application. Opt-in: with this section absent,
 # nothing switches on its own. Every automatic switch prints a line saying so.
 #

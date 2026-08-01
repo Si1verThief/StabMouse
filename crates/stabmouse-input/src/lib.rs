@@ -16,6 +16,10 @@
 //! The residual risk is a daemon that is alive but wedged while holding a grab. That is
 //! the watchdog's job (see docs/modules.md), not this crate's.
 
+mod listen;
+
+pub use listen::{code_for, is_mouse_button, Listener};
+
 use evdev::{AttributeSet, Device, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use stabmouse_config::Identity;
 use std::path::{Path, PathBuf};
@@ -51,6 +55,12 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    #[error(
+        "no readable keyboard carries that key, so a keyboard modifier cannot work. \
+         Bind a mouse button instead, or check 'input' group membership"
+    )]
+    NoKeyboard,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

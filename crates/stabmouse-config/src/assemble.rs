@@ -11,8 +11,8 @@
 use crate::cascade::DeviceView;
 use crate::schema::{Preset, StageEntry};
 use stabmouse_core::stages::{
-    Average, Curve, Deadzone, Normalize, Pressure, Rotate, Sensitivity, Smooth, SpeedSource,
-    Weighting,
+    Average, Constraint, Curve, Deadzone, Normalize, Pressure, Rotate, Sensitivity, Smooth,
+    Snap, SpeedSource, Weighting,
     StallBehaviour, Stabilize,
 };
 use stabmouse_core::{Pipeline, Stage};
@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 ///
 /// Listed explicitly so a preset referencing one gets an honest "not implemented yet"
 /// rather than a silent omission that leaves the user wondering why nothing changed.
-const PLANNED: &[&str] = &["snap", "scroll"];
+const PLANNED: &[&str] = &["scroll"];
 
 pub struct Assembly {
     pub pipeline: Pipeline,
@@ -81,6 +81,7 @@ pub fn assemble(preset: &Preset, slug: &str, view: Option<&DeviceView<'_>>) -> A
                 p.f64("catch_up", 0.35),
             ))),
             "average" => Some(Box::new(build_average(&mut p))),
+            "snap" => Some(Box::new(build_snap(&mut p))),
             "pressure" => Some(Box::new(build_pressure(&mut p))),
             other => {
                 if PLANNED.contains(&other) {
@@ -149,6 +150,44 @@ fn build_average(p: &mut Params) -> Average {
         }
     };
     Average::new(window_ms, weighting)
+}
+
+fn build_snap(p: &mut Params) -> Snap {
+    let divisions = p.f64("divisions", 4.0).max(1.0) as u32;
+    // Half a division, so every direction belongs to some allowed one and a lock behaves as a
+    // lock. Narrowing it turns the constraint into a magnet that only bites near an axis,
+    // which is the soft behaviour the parameter exists to offer.
+    let default_tolerance = 180.0 / f64::from(divisions.max(1));
+    let constraint = match p.str("constraint", "angle").as_str() {
+        "angle" => Constraint::Angle {
+            divisions,
+            tolerance_deg: p.f64("tolerance_deg", default_tolerance),
+        },
+        "line" => Constraint::Line,
+        other => {
+            p.warn(format!("unknown constraint '{other}'; using angle"));
+            Constraint::Angle {
+                divisions,
+                tolerance_deg: p.f64("tolerance_deg", default_tolerance),
+            }
+        }
+    };
+
+    // Modifier-held by default, the way shift-constrain works everywhere else. The binding
+    // itself is the daemon's to resolve — this stage only needs to know whether to wait for it.
+    let needs_modifier = match p.str("activation", "modifier").as_str() {
+        "modifier" => true,
+        "always" => false,
+        other => {
+            p.warn(format!("unknown activation '{other}'; using modifier"));
+            true
+        }
+    };
+    // Consumed here so it is not reported as an unknown parameter; the daemon reads it from
+    // the raw preset because resolving a keycode is platform work and this crate is portable.
+    let _ = p.str("modifier", "");
+
+    Snap::new(constraint, p.f64("strength", 1.0), needs_modifier)
 }
 
 fn build_sensitivity(p: &mut Params) -> Sensitivity {
@@ -409,7 +448,7 @@ mod tests {
 
     #[test]
     fn a_planned_but_unimplemented_stage_says_so_specifically() {
-        let p = preset_from("[[stage]]\ntype = \"snap\"\n");
+        let p = preset_from("[[stage]]\ntype = \"scroll\"\n");
         let a = assemble(&p, "future", None);
         assert!(
             a.warnings
@@ -418,6 +457,19 @@ mod tests {
             "{:?}",
             a.warnings
         );
+    }
+
+    #[test]
+    fn snap_builds_and_takes_its_binding_without_complaint() {
+        // `modifier` is consumed here but resolved by the daemon, so it must not be reported
+        // as an unknown parameter — a warning on a correct config trains people to ignore them.
+        let p = preset_from(
+            "[[stage]]\ntype = \"snap\"\nconstraint = \"angle\"\ndivisions = 8\n\
+             strength = 0.8\nactivation = \"modifier\"\nmodifier = \"BTN_SIDE\"\n",
+        );
+        let a = assemble(&p, "inking", None);
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
+        assert!(a.pipeline.stage_names().any(|n| n == "snap"));
     }
 
     #[test]

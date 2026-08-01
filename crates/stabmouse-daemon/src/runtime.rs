@@ -66,6 +66,16 @@ pub struct Runtime {
     /// Proof of life for the watchdog. Marked around each unit of work, never around the
     /// blocking wait — an idle daemon is not a wedged one.
     pub beat: crate::watchdog::Heartbeat,
+    /// Keyboards watched for a constrain modifier, when a mode binds a keyboard key.
+    ///
+    /// `None` unless some mode asks for one — a mouse-button binding needs no keyboard opened
+    /// at all, and an unopened device is the strongest privacy guarantee available.
+    pub listener: Option<stabmouse_input::Listener>,
+    /// Whether the current mode's modifier is a mouse button that is currently held.
+    ///
+    /// Tracked here rather than read from the report, because a button's state persists
+    /// between reports while `report.keys` carries only transitions.
+    pub buttons_held: Vec<u16>,
     pub last_tablet_xy: (i32, i32),
     /// State the D-Bus service reads. Written here, never read by the loop itself.
     pub published: crate::service::Published,
@@ -152,6 +162,12 @@ impl Runtime {
         if let Some(w) = &watcher {
             fds.push(w.raw_fd());
         }
+        // Watched keyboards occupy the tail of the poll set, so their indices are known only
+        // once the optional config watcher has or has not claimed slot 2.
+        let keyboards_from = fds.len();
+        if let Some(l) = &self.listener {
+            fds.extend(l.raw_fds());
+        }
 
         // Announced once at startup rather than left for a client to discover. Tablets that
         // were not confined to their screens still work, but they cover the whole desktop —
@@ -211,6 +227,16 @@ impl Runtime {
             // above deliberately sits outside it: an idle daemon may stay in `poll`
             // indefinitely and that is the correct resting state, not a wedge. See watchdog.rs.
             let _work = self.beat.work();
+
+            // Modifier state before anything is filtered, so a constraint engages on the same
+            // report the user's press arrived in rather than one late.
+            if let Some(listener) = &mut self.listener {
+                for i in 0..listener.raw_fds().len() {
+                    if wake.has(keyboards_from + i) {
+                        listener.drain(i);
+                    }
+                }
+            }
 
             // Control first: a queued switch should take effect before the next batch of motion
             // is filtered, not after it.
@@ -627,11 +653,36 @@ impl Runtime {
         }
     }
 
-    fn track_button(&self, report: &Report, stroke_active: &mut bool) {
+    fn track_button(&mut self, report: &Report, stroke_active: &mut bool) {
         for (code, pressed) in &report.keys {
             if *code == self.pen_button {
                 *stroke_active = *pressed;
             }
+            // Held state for every button, since a modifier bound to one is asked about on
+            // samples that carry no transition of its own.
+            match (pressed, self.buttons_held.iter().position(|c| c == code)) {
+                (true, None) => self.buttons_held.push(*code),
+                (false, Some(i)) => {
+                    self.buttons_held.swap_remove(i);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether the current mode's constrain modifier is held.
+    ///
+    /// A mouse button is answered from the grabbed device's own state; a keyboard key from the
+    /// listener. A mode that binds nothing is never constrained, which is what makes `snap`
+    /// with `activation = "modifier"` and no binding inert rather than stuck on.
+    fn constrain_held(&self) -> bool {
+        let Some(code) = self.modes.current().and_then(|m| m.modifier) else {
+            return false;
+        };
+        if stabmouse_input::is_mouse_button(code) {
+            self.buttons_held.contains(&code)
+        } else {
+            self.listener.as_ref().is_some_and(|l| l.is_held(code))
         }
     }
 
@@ -676,6 +727,9 @@ impl Runtime {
             );
         }
 
+        // Read before the mutable borrow of the mode below.
+        let constrain = self.constrain_held();
+
         let Some(mode) = self.modes.current_mut() else {
             return Ok(());
         };
@@ -686,6 +740,7 @@ impl Runtime {
             t_us,
             *stroke_active,
         );
+        sample.constrain = constrain;
         mode.pipeline.process(&mut sample);
 
         match output {
@@ -807,8 +862,28 @@ impl Runtime {
                 // live. A screen crossing hands over, and any path that misses it leaves a
                 // second tool in proximity on another screen.
                 self.tablets.lift_inactive();
+
+                // **Two devices must not claim an absolute position in the same instant.**
+                // The wheel below is delivered through the absolute pointer, positioned on the
+                // pen so the scroll lands where the user is pointing — and if the tablet also
+                // emits motion on that sample, the compositor is handed two conflicting
+                // absolute positions at once and the scroll is lost between them.
+                //
+                // Diagnosed from the exact symptom: scrolling worked while the pen was
+                // *stationary* and not while it moved. A stationary pen emits nothing at all,
+                // because `TabletSink::pen` states only axes that changed — so the quiet case
+                // was the one with no conflict.
+                //
+                // Skipping the tablet's motion for that sample is invisible: the mapper still
+                // tracks the position, so the pen resumes from the right place the moment
+                // scrolling stops, and this path is only reachable while hovering, so no touch
+                // or pressure state can be affected.
+                let scrolling = !*stroke_active && !report.other_relative.is_empty();
+
                 let tablet = self.tablets.active().ensure()?;
-                tablet.pen(x, y, sample.pressure.unwrap_or(0.0), *stroke_active);
+                if !scrolling {
+                    tablet.pen(x, y, sample.pressure.unwrap_or(0.0), *stroke_active);
+                }
                 for (code, pressed) in &report.keys {
                     // Right and middle also become barrel buttons, for applications that read
                     // them as such.

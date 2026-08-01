@@ -14,6 +14,11 @@ pub struct Mode {
     /// Built up front. Switching is an index change, never a config load — the pipeline for
     /// every slot is resident before the hotkey is ever pressed.
     pub pipeline: Pipeline,
+    /// evdev code of this mode's constrain modifier, when its preset binds one.
+    ///
+    /// Resolved once at build time rather than per sample: the name-to-code lookup is a string
+    /// comparison against the whole evdev table, which has no business on the hot path.
+    pub modifier: Option<u16>,
 }
 
 pub struct Modes {
@@ -63,6 +68,12 @@ impl Modes {
 
     pub fn current_mut(&mut self) -> Option<&mut Mode> {
         self.slots.get_mut(self.current)
+    }
+
+    /// Every slot, for callers that must consider all modes rather than the current one —
+    /// which keyboards to watch is a union across the whole profile, not a per-mode question.
+    pub fn slots(&self) -> &[Mode] {
+        &self.slots
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -200,6 +211,7 @@ mod tests {
                 },
                 preset: "raw".into(),
                 pipeline: Pipeline::new(vec![]),
+                modifier: None,
             })
             .collect();
         Modes::new(slots, 0)
