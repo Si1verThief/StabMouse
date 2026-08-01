@@ -502,8 +502,14 @@ component ParamControl inherits Rectangle {
             spacing: Theme.gap;
             Track {
                 horizontal-stretch: 1;
-                minimum: root.param.minimum;
-                maximum: root.param.maximum;
+                // **The range stretches to hold whatever the field says.**
+                //
+                // Typing a value past the recommended range pinned the handle at the end, and
+                // the next drag then snapped back inside it — the field and the slider
+                // disagreed about the value, and the slider won. Widening here keeps "fields
+                // decide" true after the typing as well as during it.
+                minimum: min(root.param.minimum, root.live);
+                maximum: max(root.param.maximum, root.live);
                 value: root.live;
                 // Moving only updates what is on screen; the value is written when the hand
                 // lets go, so a drag is one change rather than several hundred.
