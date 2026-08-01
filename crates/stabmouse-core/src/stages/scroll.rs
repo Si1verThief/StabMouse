@@ -83,6 +83,17 @@ pub struct Scroll {
     pub momentum: bool,
     /// Seconds for a flick to decay to about a third of its release speed.
     pub momentum_decay_s: f64,
+    /// How far a flick travels compared to what was actually turned.
+    ///
+    /// 1.0 is honest: everything the page does adds up to the notches you turned, delivered
+    /// with a tail rather than in steps. Above that a fling overshoots deliberately, the way a
+    /// touchpad throws a page further than the finger went.
+    ///
+    /// Separate from `momentum_decay_s` because they are genuinely different questions — how
+    /// *far* against how *long* — and one number answering both is a number that cannot be
+    /// set. Multiplying the charge keeps them orthogonal: strength scales the total, decay
+    /// scales the time it is spread over.
+    pub momentum_strength: f64,
     /// Notches of output per notch of wheel, in `wheel` mode.
     pub wheel_gain: f64,
     /// Act with nothing held, in `wheel` mode.
@@ -149,6 +160,8 @@ impl Scroll {
             // A flick that dies in a third of a second reads as a surface with weight rather
             // than as one that keeps going after the hand has moved on.
             momentum_decay_s: 0.35,
+            // Honest by default: a page that travels exactly as far as the wheel was turned.
+            momentum_strength: 1.0,
             wheel_gain: 1.0,
             always_active: false,
             full_release_stops_momentum: false,
@@ -203,6 +216,15 @@ impl Scroll {
             self.momentum_decay_s
         } else {
             0.35
+        }
+    }
+
+    /// Flick amplification, sanitised.
+    fn strength(&self) -> f64 {
+        if self.momentum_strength.is_finite() && self.momentum_strength > 0.0 {
+            self.momentum_strength
+        } else {
+            1.0
         }
     }
 
@@ -275,27 +297,29 @@ impl Stage for Scroll {
                 let (v, h) = (s.wheel_v * gain * sign, s.wheel_h * gain * sign);
                 s.wheel_v = 0.0;
                 s.wheel_h = 0.0;
-                s.scroll_y += v;
-                s.scroll_x += h;
-                // A notch is an impulse, not a rate, so it is seeded by the distance it should
-                // coast rather than by a speed.
-                //
-                // **Dividing by `dt` was catastrophically wrong.** An exponential decaying
-                // from rate `R` travels `R × tau` in total, so `v / dt` coasted `v × tau / dt`
-                // — with a 375ms decay and an 8ms sample, forty-seven notches of glide for one
-                // notch of wheel. Worse, it scaled with the sample rate, so the same flick
-                // coasted further when the hand happened to be moving. That is why the
-                // multiplier felt violent at every setting above its minimum: the multiplier
-                // was fine and the momentum behind it was two orders of magnitude out.
-                //
-                // Seeding `v / tau` makes the total coast one notch per notch, and leaves the
-                // decay time deciding how *long* it takes rather than how *far* it goes —
-                // which is the only reading of "decay" that lets the two be tuned separately.
+
                 if self.momentum {
-                    let tau = self.tau();
-                    self.glide_y += v / tau;
-                    self.glide_x += h / tau;
+                    // **With momentum on, a notch is spent entirely on speed.** It is not also
+                    // emitted directly, and that is the correction: emitting the notch *and*
+                    // running a glide made the two trade against each other exactly. A slow
+                    // spin gave the glide time to pay itself out between notches; a fast one
+                    // replaced it before it could — and the difference cancelled, so five
+                    // notches travelled the same distance flung or crept. Which is the whole
+                    // thing this was meant to fix.
+                    //
+                    // What is left is an ordinary velocity: notches charge it, it decays, and
+                    // everything the page does comes out of it. Spinning hard leaves it high,
+                    // so letting go coasts far; nudging once barely moves it. No part of the
+                    // spin is thrown away, because the store *is* the measurement — a leaky
+                    // integrator of notches is a rate, and it knows about every notch that
+                    // has not yet decayed rather than only the one in hand.
+                    let charge = self.strength() / self.tau();
+                    self.glide_y += v * charge;
+                    self.glide_x += h * charge;
                     self.coasting = true;
+                } else {
+                    s.scroll_y += v;
+                    s.scroll_x += h;
                 }
             }
             // Letting go of the modifier is the brake, on the same binding rather than a
@@ -303,6 +327,8 @@ impl Stage for Scroll {
             if !acting && self.full_release_stops_momentum && !s.scroll_partial {
                 self.glide_x = 0.0;
                 self.glide_y = 0.0;
+                // The spin too, or the next notch would inherit a rate from before the brake
+                // and fling from a standing start.
             }
             self.glide(s, dt);
             return;
@@ -737,64 +763,93 @@ mod tests {
         assert_eq!((held.wheel_v, held.wheel_h), (0.0, 0.0), "held must take it");
     }
 
-    /// Total scroll from one notch of wheel, including everything it coasts afterwards.
-    fn wheel_flick_total(decay_s: f64, sample_dt: f64) -> f64 {
+    /// Spin the wheel `notches` times, one every `gap` seconds, then let go and coast to a
+    /// stop. Returns the scroll produced *during* the spin and the scroll produced *after* the
+    /// last notch — the coast, which is the part momentum is actually about.
+    fn spin(notches: usize, gap: f64, decay_s: f64, strength: f64, sample_dt: f64) -> (f64, f64) {
         let mut stage = Scroll::new(Mode::Wheel);
         stage.always_active = true;
         stage.momentum = true;
         stage.momentum_decay_s = decay_s;
+        stage.momentum_strength = strength;
 
-        let mut total = 0.0;
-        let mut s = Sample::new(0.0, 0.0, 1000, false);
-        s.dt = sample_dt;
-        s.wheel_v = 1.0;
-        stage.process(&mut s);
-        total += s.scroll_y;
-
-        for i in 0..4000 {
-            let mut s = Sample::new(0.0, 0.0, (i + 2) * 1000, false);
+        let mut t = 0u64;
+        let mut feed = |stage: &mut Scroll, wheel: f64, t: &mut u64| {
+            *t += 1000;
+            let mut s = Sample::new(0.0, 0.0, *t, false);
             s.dt = sample_dt;
+            s.wheel_v = wheel;
             stage.process(&mut s);
-            total += s.scroll_y;
+            s.scroll_y
+        };
+
+        let between = ((gap / sample_dt).round() as usize).max(1);
+        let mut during = 0.0;
+        for _ in 0..notches {
+            during += feed(&mut stage, 1.0, &mut t);
+            for _ in 1..between {
+                during += feed(&mut stage, 0.0, &mut t);
+            }
         }
-        total
+        // The last notch's own gap belongs to the coast, not the spin.
+        let mut after = 0.0;
+        for _ in 0..8000 {
+            after += feed(&mut stage, 0.0, &mut t);
+        }
+        (during, after)
     }
 
     #[test]
-    fn one_notch_of_wheel_coasts_about_one_notch() {
-        // It coasted about *forty-seven*. The glide was seeded `v / dt`, and an exponential
-        // decaying from rate R travels R×tau, so the total came to v×tau/dt — a number with
-        // the sample interval in the denominator, which has no business deciding how far a
-        // page moves. It made the multiplier feel violent at every setting above its minimum.
-        let total = wheel_flick_total(0.35, 0.008);
+    fn spinning_the_wheel_faster_leaves_far_more_behind_when_you_stop() {
+        // The request this exists to answer: a hard spin must fling. Seeded from the notch in
+        // hand, the coast knew about one notch however many had just gone past — so five
+        // notches flung and five crept left the same tail, and the spin was thrown away.
+        let (_, flung) = spin(5, 0.02, 0.35, 1.0, 0.008);
+        let (_, crept) = spin(5, 0.30, 0.35, 1.0, 0.008);
         assert!(
-            (1.5..3.0).contains(&total),
-            "one notch plus about one notch of coast, got {total}"
+            flung > crept * 2.0,
+            "the same five notches spun hard must leave much more behind: {flung} vs {crept}"
         );
     }
 
     #[test]
-    fn the_decay_time_changes_how_long_a_coast_lasts_not_how_far_it_goes() {
-        // The whole reason to seed by distance. Otherwise every adjustment to the decay
-        // silently retunes the strength as well, and neither can be set without the other.
-        let quick = wheel_flick_total(0.15, 0.008);
-        let slow = wheel_flick_total(1.2, 0.008);
+    fn momentum_delivers_what_was_turned_and_no_more() {
+        // At strength 1 the page goes exactly as far as the wheel said, whatever the timing —
+        // momentum decides *when* it arrives, not how much of it there is. Without this the
+        // gesture quietly amplifies, which is how one notch once became forty-seven.
+        for gap in [0.01, 0.05, 0.4] {
+            let (during, after) = spin(5, gap, 0.35, 1.0, 0.008);
+            let total = during + after;
+            assert!(
+                (4.0..5.2).contains(&total),
+                "five notches must travel five notches, got {total} at gap {gap}"
+            );
+        }
+    }
+
+    #[test]
+    fn strength_scales_the_flick_and_nothing_else() {
+        let (d1, a1) = spin(5, 0.02, 0.35, 1.0, 0.008);
+        let (d2, a2) = spin(5, 0.02, 0.35, 2.0, 0.008);
+        let ratio = (d2 + a2) / (d1 + a1);
         assert!(
-            (quick - slow).abs() < 0.35,
-            "decay must not change the distance: {quick} vs {slow}"
+            (1.8..2.2).contains(&ratio),
+            "double the strength, double the travel: {ratio}"
         );
     }
 
     #[test]
-    fn a_flick_coasts_the_same_distance_whatever_the_sample_rate() {
+    fn a_flick_travels_the_same_distance_whatever_the_sample_rate() {
         // The hand happening to be moving must not make the wheel scroll further. The daemon
-        // ticks faster while the mouse is in motion, and the old seeding turned that into a
+        // ticks faster while the mouse is in motion, and an earlier seeding turned that into a
         // multiplier on the momentum.
-        let fast = wheel_flick_total(0.35, 0.001);
-        let slow = wheel_flick_total(0.35, 0.016);
+        let (d1, a1) = spin(3, 0.05, 0.35, 1.0, 0.001);
+        let (d2, a2) = spin(3, 0.05, 0.35, 1.0, 0.016);
         assert!(
-            (fast - slow).abs() < 0.35,
-            "sample rate must not change the distance: {fast} vs {slow}"
+            ((d1 + a1) - (d2 + a2)).abs() < 0.4,
+            "sample rate must not change the distance: {} vs {}",
+            d1 + a1,
+            d2 + a2
         );
     }
 

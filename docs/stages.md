@@ -294,6 +294,7 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | `mouse_passthrough` | enum | `always` · `unless_active` (default) · `reserved` |
 | `wheel_gain` | f64 | `wheel` mode: output notches per wheel notch |
 | `always_active` | bool | `wheel` mode: act with nothing held. Off by default |
+| `momentum_strength` | f64 | How far a flick travels against what was turned. 1 is honest |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
 | `speed` | f64 | Notches per millimetre of hand travel. Higher is faster |
@@ -396,9 +397,28 @@ releasing it is the gesture ending rather than a hand loosening its grip. The ed
 it as *Releasing the modifier stops momentum* there: the same setting, but "full release" is
 not what the user would be doing.
 
-**Momentum** (`momentum`, `momentum_decay_ms`) carries a released flick onward, decaying
-exponentially, so a long page feels like a surface with weight rather than a crank. Off by
-default. Joystick has no release to carry from and ignores it.
+**Momentum** (`momentum`, `momentum_decay_ms`, `momentum_strength`) carries a released flick
+onward, decaying exponentially, so a long page feels like a surface with weight rather than a
+crank. Off by default. Joystick has no release to carry from and ignores it.
+
+**With momentum on, a wheel notch is spent entirely on velocity and is not also emitted
+directly.** Everything the page does comes out of one store that notches charge and time
+decays. That is not a stylistic choice — emitting the notch *and* running a glide makes the
+two trade against each other exactly. A slow spin gives the glide time to pay itself out
+between notches and a fast one replaces it before it can, and the difference cancels: five
+notches travelled the same distance flung or crept, which is the one thing momentum is for.
+
+The store is also the rate measurement. A leaky integrator of notches *is* notches per second,
+and it knows about every notch that has not yet decayed rather than only the one in hand —
+which is what a spin is. Seeding from the notch in hand meant a hard spin coasted no further
+than a single nudge, because every notch was worth the same flick and the rest of the spin was
+thrown away.
+
+**Strength and decay are separate questions.** Decay is how *long* a flick takes to fade;
+strength is how *far* it goes. At strength 1 the page travels exactly as far as the wheel was
+turned, whatever the timing — momentum decides when the movement arrives, not how much of it
+there is. Above 1 a fling overshoots deliberately, the way a touchpad throws a page further
+than the finger went. One number answering both is a number that cannot be set.
 
 A new press cancels a glide, because a hand back on the mouse wants control rather than to
 fight the page's leftover speed — **but `wheel` mode is exempt**, since its binding is a

@@ -604,7 +604,25 @@ pub const STAGES: &[StageSpec] = &[
                     100.0,
                     1500.0,
                     0,
-                    "How long a flick takes to fade to about a third of its release speed.",
+                    "How long a flick takes to fade to about a third of its speed. This \
+                     is the *time* only — how far it goes is the strength below.",
+                ),
+                "mode",
+                "joystick",
+            ),
+            not_when(
+                f(
+                    "momentum_strength",
+                    "Momentum strength",
+                    "×",
+                    1.0,
+                    0.5,
+                    4.0,
+                    2,
+                    "How far a flick travels against what you actually turned. 1 is honest — \
+                     the page goes exactly as far as the wheel said, just with a tail instead \
+                     of in steps. Above that a fling overshoots on purpose. Separate from the \
+                     decay because how far and how long are different questions.",
                 ),
                 "mode",
                 "joystick",

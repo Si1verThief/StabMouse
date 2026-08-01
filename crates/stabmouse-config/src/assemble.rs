@@ -220,6 +220,7 @@ fn build_scroll(p: &mut Params) -> Scroll {
     let _ = p.str("mouse_passthrough", "");
     scroll.momentum = p.bool("momentum", scroll.momentum);
     scroll.momentum_decay_s = p.f64("momentum_decay_ms", scroll.momentum_decay_s * 1000.0) / 1000.0;
+    scroll.momentum_strength = p.f64("momentum_strength", scroll.momentum_strength);
     // Resolved by the daemon, for the same reason `snap.modifier` is: turning a name into an
     // evdev code is platform work, and this crate builds for wasm and PyO3.
     let _ = p.str("button", "");
