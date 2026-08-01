@@ -833,13 +833,12 @@ its name is still visible in the map. The ladder, strongest first:
 clicking entirely and silently; a wrong pointer loses pressure in one application,
 visibly, with a one-line fix.
 
-**Known cost, accepted for now.** The pen transport now covers most of the desktop
-in tablet mode, and in pen transport the wheel is pressure modulation, not
-scrolling — so hover-scrolling over, say, a Qt file manager stops working while a
-tablet mode is active. That is D18's "tablet mode is not a general-purpose pointer
-mode" showing through, and the pointer-register sync work is where it can be fixed
-properly (wheel through the pointer needs the pointer's position to agree with the
-visible cursor). Until then, mode switching or an override is the escape hatch.
+**Known cost — since fixed.** Broadening the pen transport meant the wheel stopped
+scrolling over pen-capable windows, because a pen carries no wheel and the relative
+pointer's position was untrustworthy. The absolute pointer removed that obstacle: the
+wheel now passes through it, positioned on the pen, whenever the pen is hovering
+(D22's consequences). With the pen *down* the wheel remains reserved for
+`pressure.manual`, which stages.md specifies as active only during a stroke.
 
 ---
 
@@ -872,6 +871,10 @@ cause of hover focus tracking going blind in tablet transport (see the focus mod
   is obsolete — there is nothing left to reposition.
 - Fallback wheel and buttons travel through the same sink, so they land **under the
   visible cursor**. The relative path could guarantee neither.
+- **The wheel works in tablet transport too**, by the same route: positioned on the
+  pen, emitted through the absolute pointer, and only while hovering — with the pen
+  down the wheel belongs to `pressure.manual`. Scrolling a document under the pen no
+  longer requires leaving tablet mode.
 - D18's mirrored tablet clicks become correct at last: the press goes through the
   absolute pointer placed on the pen's position first — the same pixel the cursor
   already occupies, so nothing visibly moves.

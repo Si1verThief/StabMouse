@@ -313,7 +313,10 @@ Nothing in the design may depend on a usable analogue input being available.
 Two sources:
 
 - **`wheel`** — best on a free-spinning wheel. Active **only while a stroke is in
-  progress**, so scrolling and zooming still work between strokes.
+  progress**, so scrolling and zooming still work between strokes. The between-strokes
+  half is built: a hovering pen's wheel is emitted through the absolute pointer at the
+  pen's position, so it scrolls whatever the pen is over (D22). The wheel is therefore
+  already reserved during strokes, and this term can be added without contending for it.
 - **`button_ramp`** — hold a button and pressure ramps toward a target; release and it
   ramps back. Coarser than a real analogue axis but *continuous*, and it works on any
   mouse rather than only the ones with the right wheel.

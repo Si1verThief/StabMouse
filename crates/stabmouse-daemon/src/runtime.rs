@@ -63,6 +63,9 @@ pub struct Runtime {
     pub emitted_motion: bool,
     /// When a sink last carried motion, gating cursor-report adoption — see [`ADOPT_IDLE`].
     pub last_emit: Instant,
+    /// Proof of life for the watchdog. Marked around each unit of work, never around the
+    /// blocking wait — an idle daemon is not a wedged one.
+    pub beat: crate::watchdog::Heartbeat,
     pub last_tablet_xy: (i32, i32),
     /// State the D-Bus service reads. Written here, never read by the loop itself.
     pub published: crate::service::Published,
@@ -199,6 +202,12 @@ impl Runtime {
             if wake == Wake::Interrupted {
                 continue;
             }
+
+            // Everything from here to the end of the iteration is work the watchdog holds to a
+            // deadline, and the guard ends it however this iteration ends. The blocking wait
+            // above deliberately sits outside it: an idle daemon may stay in `poll`
+            // indefinitely and that is the correct resting state, not a wedge. See watchdog.rs.
+            let _work = self.beat.work();
 
             // Control first: a queued switch should take effect before the next batch of motion
             // is filtered, not after it.
@@ -361,6 +370,7 @@ impl Runtime {
                     self.publish(Change::Config);
                 }
             }
+
         }
 
         Ok(stats)
@@ -762,24 +772,49 @@ impl Runtime {
                 }
                 tablet.flush()?;
 
-                // The pen alone cannot press anything outside a tablet-aware application, so
-                // the buttons are mirrored onto a pointer. The relative pointer's position is
-                // stale while the pen drives (D18 measured the mirrored press landing somewhere
-                // else entirely), so the press goes through the absolute pointer, placed on the
-                // pen first — same pixel the cursor is already on, so nothing visibly moves.
-                if self.tablet_clicks && !report.keys.is_empty() {
-                    match (self.pointer.as_mut(), self.tablets.position_px()) {
+                // Neither the wheel nor a button can reach an application through the pen:
+                // KWin turns a tip into a click only behind a deprecated environment variable
+                // (D18), and a pen carries no wheel at all. Both therefore go through the
+                // absolute pointer, placed on the pen's position first — the pixel the cursor
+                // already occupies, so nothing visibly moves and the scroll lands under
+                // whatever the user is pointing at.
+                //
+                // **Wheel passes through only while hovering.** With the pen down the wheel is
+                // not scroll: it is the input to `pressure.manual` (stages.md), which is
+                // specified as active only during a stroke. Reserving it now means building
+                // that term cannot make one notch do two things at once — and scrolling
+                // mid-stroke is meaningless anyway, since the hand is drawing.
+                //
+                // Clicks stay behind `tablet_emits_mouse_clicks` because an application that
+                // reads both tablet and mouse buttons would see one press twice. The wheel has
+                // no such hazard — the pen has no wheel to double with — so it is unconditional.
+                let wheel: &[(u16, i32)] = if *stroke_active {
+                    &[]
+                } else {
+                    &report.other_relative
+                };
+                let clicks: &[(u16, bool)] = if self.tablet_clicks { &report.keys } else { &[] };
+                if !wheel.is_empty() || !clicks.is_empty() {
+                    let at = self.tablets.position_px();
+                    match (self.pointer.as_mut(), at) {
                         (Some(pointer), Some((px, py))) => {
                             pointer.position(px, py);
-                            for (code, pressed) in &report.keys {
+                            for (code, value) in wheel {
+                                pointer.relative(*code, *value);
+                            }
+                            for (code, pressed) in clicks {
                                 pointer.key(*code, *pressed);
                             }
                             pointer.flush()?;
                         }
                         _ => {
-                            // No absolute pointer: the old behaviour, wrong position and all —
-                            // a press somewhere still beats no press anywhere.
-                            for (code, pressed) in &report.keys {
+                            // No absolute pointer. The wheel still works — scrolling needs no
+                            // position, only focus — while clicks keep the old wrong-position
+                            // behaviour, since a press somewhere beats no press anywhere.
+                            for (code, value) in wheel {
+                                self.mouse.relative(*code, *value);
+                            }
+                            for (code, pressed) in clicks {
                                 self.mouse.key(*code, *pressed);
                             }
                             self.mouse.flush()?;
