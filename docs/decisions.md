@@ -833,6 +833,37 @@ its name is still visible in the map. The ladder, strongest first:
 clicking entirely and silently; a wrong pointer loses pressure in one application,
 visibly, with a one-line fix.
 
+### Correction, 2026-08-01: the toolkit tier was wrong and has been demoted
+
+**Capability is not use.** Granting the pen to every Qt and GTK application was a
+mistake, and the reasoning above contains the error: it treats "the toolkit binds
+`zwp_tablet_manager_v2`" as equivalent to "this application does something with a pen".
+
+The two differ on Wayland in a way that matters. Under XWayland, a tablet arrives as an
+XInput device and **the X server emulates core pointer events from it**, so every X11
+client gets working motion, hover and clicks whether or not it knows what a tablet is.
+Wayland has no equivalent — `wl_pointer` and `zwp_tablet_tool_v2` are separate protocols
+with separate focus and nothing bridges them. A Wayland application without its own
+tablet handling receives **nothing at all** from a pen while its cursor moves normally,
+which reads as the application having frozen.
+
+Reported in use: in a drawing mode, KDE's panel and every Qt window stopped highlighting
+and stopped accepting clicks. plasmashell is Qt, so it was being handed a pen it has no
+code to receive — and because the panel is also how you switch applications, the whole
+desktop appeared to lock up.
+
+So the ladder is now: user override → **a curated list of applications that actually
+implement pen input** → X11 (where the platform guarantees it) → everything else takes
+the pointer. The toolkit signal survives only as a *hint*, reported in the transport log
+so the user can see that an application could take a pen if they add it to
+`[tablet_support]`.
+
+What survives from the original change is the part that was genuinely broken: GTK3 was
+being condemned by a scan of `libgtk-3` when its Wayland code lives in `libgdk-3`, and
+the X11 tier was being computed and then ignored. The allow-list this replaced was closer
+to right than what replaced it, which is worth remembering — **the safe direction here is
+narrow**, because being wrong toward the pen costs every click in that window.
+
 **Known cost — since fixed.** Broadening the pen transport meant the wheel stopped
 scrolling over pen-capable windows, because a pen carries no wheel and the relative
 pointer's position was untrustworthy. The absolute pointer removed that obstacle: the
@@ -871,10 +902,12 @@ cause of hover focus tracking going blind in tablet transport (see the focus mod
   is obsolete — there is nothing left to reposition.
 - Fallback wheel and buttons travel through the same sink, so they land **under the
   visible cursor**. The relative path could guarantee neither.
-- **The wheel works in tablet transport too**, by the same route: positioned on the
-  pen, emitted through the absolute pointer, and only while hovering — with the pen
-  down the wheel belongs to `pressure.manual`. Scrolling a document under the pen no
-  longer requires leaving tablet mode.
+- **The wheel works in tablet transport too**, though *not* by this route in the end —
+  it leaves by the tablet device itself, which carries its own wheel. Krita discards
+  mouse input while a pen is in proximity, so a wheel from a second device is filtered
+  out; from the tablet there is no second device to be suspicious of. See P9 and the
+  note under D21. Still hover-only: with the pen down the wheel belongs to
+  `pressure.manual`.
 - D18's mirrored tablet clicks become correct at last: the press goes through the
   absolute pointer placed on the pen's position first — the same pixel the cursor
   already occupies, so nothing visibly moves.

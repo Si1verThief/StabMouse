@@ -392,22 +392,39 @@ pub fn supports_tablet(under: &Under, overrides: &[(String, bool)]) -> bool {
 
 /// The same verdict, with the reason that produced it.
 ///
-/// The ladder, strongest claim first:
+/// # Capability is not use, and on Wayland nothing bridges the gap
 ///
-/// 1. **The user's `[tablet_support]` entry.** Always wins; it is the correction mechanism for
-///    everything below.
-/// 2. **The built-in drawing list** — applications that carry their own tablet code, so no
-///    toolkit library can vouch for them. Also shields the applications this project exists for
-///    from any inspection failure (a Flatpak's libraries are not readable from outside).
-/// 3. **What inspection established** — the toolkit tiers of [`Signal`], each of which decides
-///    the answer by itself; then the two honest names for what a string search proves.
+/// This once granted the pen to any application whose *toolkit* binds `tablet_v2`, which is
+/// every Qt and GTK application there is. That was wrong, and wrong in the worst direction.
 ///
-/// An earlier version was an allow-list of two, because the first inspection attempt searched
-/// binaries for the interface string and that was wrong in both directions: presence proves
-/// nothing (every binary compiled against `wayland-protocols` embeds the string unused — this
-/// project's own window carries it three times), and the GTK3 absence was an artifact of
-/// scanning `libgtk-3` when GTK3's Wayland code lives in `libgdk-3`. Presence-of-toolkit is a
-/// different question from presence-of-string, and it is the one with a reliable answer.
+/// **X11 and Wayland differ in a way that decides this question.** Under XWayland a tablet
+/// arrives as an XInput device, and the X server emulates core pointer events from it — so
+/// every X11 application, whatever it knows about tablets, receives working motion, hover and
+/// clicks. Wayland has no equivalent: `wl_pointer` and `zwp_tablet_tool_v2` are separate
+/// protocols with separate focus, and **nothing converts one into the other**. A Wayland
+/// application that does not implement tablet handling itself receives *nothing at all* from a
+/// pen — no hover, no clicks — while its cursor moves normally, which reads as the application
+/// being frozen rather than as an input mismatch.
+///
+/// Observed exactly that way in use (2026-08-01): in a drawing mode, KDE's own panel and every
+/// Qt window stopped highlighting or accepting clicks, because plasmashell is Qt and was
+/// therefore being sent a pen it has no code to receive.
+///
+/// So the toolkit tier is **demoted to a hint**: it says an application *could* take a pen if
+/// the user says it does, and nothing more. The ladder, strongest claim first:
+///
+/// 1. **The user's `[tablet_support]` entry.** Always wins; the correction mechanism for
+///    everything below, and the way to promote an application this list has not heard of.
+/// 2. **The built-in list of applications that actually handle a pen.** Not toolkits —
+///    programs, verified by the fact that pen support is a feature they advertise.
+/// 3. **X11 under XWayland**, where core pointer emulation makes a pen safe for *any*
+///    application, including Wine and Proton.
+/// 4. **Everything else takes the pointer**, which always works.
+///
+/// The earlier allow-list of two was closer to right than the toolkit tier that replaced it.
+/// What survives from that change is the part that was genuinely broken: GTK3 was being
+/// condemned by a scan of `libgtk-3` when its Wayland code lives in `libgdk-3`, and X11 was
+/// being computed and then ignored.
 pub fn explain(under: &Under, overrides: &[(String, bool)]) -> (bool, &'static str) {
     let class = under.class.trim();
 
@@ -420,24 +437,33 @@ pub fn explain(under: &Under, overrides: &[(String, bool)]) -> (bool, &'static s
         }
     }
 
-    // Applications that implement the tablet protocol themselves rather than through a toolkit.
-    // Blender's own GHOST windowing binds it, so no library in its map can vouch for it. Krita
-    // is Qt and would be caught by the toolkit tier, but stays named so a packaging the
-    // inspection cannot see through keeps its pen.
-    const DRAWS_WITH_A_PEN: &[&str] = &["blender", "krita"];
-
-    if DRAWS_WITH_A_PEN
-        .iter()
-        .any(|known| known.eq_ignore_ascii_case(class))
-    {
-        return (true, "on the built-in drawing list");
+    if draws_with_a_pen(class) {
+        return (true, "a known drawing application");
     }
 
     match under.signal {
-        Some(Signal::X11) => (true, "an X11 window — XWayland emulates a stylus for it"),
-        Some(Signal::QtWayland) => (true, "Qt on Wayland always binds the tablet protocol"),
-        Some(Signal::Gtk) => (true, "GTK on Wayland always binds the tablet protocol"),
-        Some(Signal::Sdl3) => (true, "SDL3 on Wayland binds the tablet protocol"),
+        // The one tier where the *platform* guarantees it, rather than the application. X's
+        // core pointer emulation turns tablet input into ordinary clicks and motion for every
+        // client, which is also what makes Wine and Proton drawing software work.
+        Some(Signal::X11) => (true, "an X11 window — X emulates pointer events from a pen"),
+
+        // Capability, not use. Named individually so the reason a window is on the pointer is
+        // legible, and so the message can say what would change it.
+        Some(Signal::QtWayland) => (
+            false,
+            "Qt on Wayland: able to receive a pen, but only if the application handles one — \
+             add it to [tablet_support] if it does",
+        ),
+        Some(Signal::Gtk) => (
+            false,
+            "GTK on Wayland: able to receive a pen, but only if the application handles one — \
+             add it to [tablet_support] if it does",
+        ),
+        Some(Signal::Sdl3) => (
+            false,
+            "SDL3 on Wayland: able to receive a pen, but only if the application handles one — \
+             add it to [tablet_support] if it does",
+        ),
         Some(Signal::Chromium) => (
             false,
             "Chromium-based; pen support varies by build, so the pointer is used — \
@@ -448,9 +474,38 @@ pub fn explain(under: &Under, overrides: &[(String, bool)]) -> (bool, &'static s
         }
         Some(Signal::Unproven) | None => (
             false,
-            "not provably pen-capable, so the pointer is used — [tablet_support] overrides this",
+            "not a known pen application, so the pointer is used — [tablet_support] overrides this",
         ),
     }
+}
+
+/// Applications known to implement pen input on Wayland.
+///
+/// **Programs, not toolkits** — see [`explain`]. Membership means the application handles
+/// `tablet_v2` itself, which is a feature its authors chose and advertise, not something a
+/// linked library can confer. Kept short and honest: a name that does not belong here costs
+/// its user every click in that window, and `[tablet_support]` is one line for anything missing.
+///
+/// Matched against the compositor's `resourceClass`, which often carries a version suffix —
+/// `gimp-2.10` — so a trailing `-…` still matches. `stabmouse-probe focus` prints the exact
+/// strings a compositor reports.
+fn draws_with_a_pen(class: &str) -> bool {
+    const KNOWN: &[&str] = &[
+        "krita",
+        "blender",
+        "gimp",
+        "inkscape",
+        "mypaint",
+        "drawpile",
+        "xournalpp",
+        "aseprite",
+        "kolourpaint",
+        "openboard",
+    ];
+    let lower = class.to_ascii_lowercase();
+    KNOWN
+        .iter()
+        .any(|k| lower == *k || lower.starts_with(&format!("{k}-")))
 }
 
 #[cfg(test)]
@@ -462,20 +517,42 @@ mod tests {
     }
 
     #[test]
-    fn the_toolkit_answers_for_its_applications() {
-        // GIMP is the case the old string search got wrong: GTK3's Wayland code lives in
-        // libgdk-3, which was never scanned, so every GTK3 application was condemned as
-        // conclusively unable to take a pen.
-        assert!(supports_tablet(&under("gimp", Some(Signal::Gtk)), &[]));
-        assert!(supports_tablet(&under("org.kde.dolphin", Some(Signal::QtWayland)), &[]));
-        assert!(supports_tablet(&under("some-sdl3-app", Some(Signal::Sdl3)), &[]));
+    fn a_pen_capable_toolkit_is_not_enough_on_its_own() {
+        // The regression this exists to prevent: every Qt and GTK window was being handed a
+        // pen, and a Wayland application with no tablet handling receives *nothing* from one —
+        // no hover, no clicks — because nothing bridges wl_pointer and tablet_v2. KDE's own
+        // panel is Qt, so in a drawing mode the whole desktop stopped responding.
+        assert!(!supports_tablet(&under("org.kde.dolphin", Some(Signal::QtWayland)), &[]));
+        assert!(!supports_tablet(&under("plasmashell", Some(Signal::QtWayland)), &[]));
+        assert!(!supports_tablet(&under("org.gnome.Nautilus", Some(Signal::Gtk)), &[]));
+        assert!(!supports_tablet(&under("some-sdl3-game", Some(Signal::Sdl3)), &[]));
+    }
+
+    #[test]
+    fn known_drawing_applications_get_the_pen_whatever_their_toolkit() {
+        for class in ["krita", "blender", "gimp", "inkscape", "mypaint", "xournalpp"] {
+            assert!(supports_tablet(&under(class, Some(Signal::QtWayland)), &[]), "{class}");
+            assert!(supports_tablet(&under(class, None), &[]), "{class} without inspection");
+        }
+    }
+
+    #[test]
+    fn a_versioned_class_still_matches_its_application() {
+        // Compositors report `gimp-2.10`, not `gimp`.
+        assert!(supports_tablet(&under("gimp-2.10", Some(Signal::Gtk)), &[]));
+        assert!(supports_tablet(&under("Krita", None), &[]), "and case does not matter");
+        // But a different program that merely starts with the same letters must not match.
+        assert!(!supports_tablet(&under("gimpshop-clone", None), &[]));
     }
 
     #[test]
     fn an_x11_window_always_gets_the_pen() {
-        // XWayland emulates a stylus: pressure via XI2, clicks via core emulation. This is the
+        // The one tier where the platform guarantees it rather than the application: X's core
+        // pointer emulation gives every client working clicks and hover from tablet input, so
+        // unlike the Wayland toolkits this is safe without knowing the program. It is also the
         // route Wine and Proton drawing applications take.
         assert!(supports_tablet(&under("clipstudiopaint.exe", Some(Signal::X11)), &[]));
+        assert!(supports_tablet(&under("some-old-x11-app", Some(Signal::X11)), &[]));
     }
 
     #[test]

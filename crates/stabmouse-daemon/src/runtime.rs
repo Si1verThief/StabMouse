@@ -863,27 +863,29 @@ impl Runtime {
                 // second tool in proximity on another screen.
                 self.tablets.lift_inactive();
 
-                // **Two devices must not claim an absolute position in the same instant.**
-                // The wheel below is delivered through the absolute pointer, positioned on the
-                // pen so the scroll lands where the user is pointing — and if the tablet also
-                // emits motion on that sample, the compositor is handed two conflicting
-                // absolute positions at once and the scroll is lost between them.
-                //
-                // Diagnosed from the exact symptom: scrolling worked while the pen was
-                // *stationary* and not while it moved. A stationary pen emits nothing at all,
-                // because `TabletSink::pen` states only axes that changed — so the quiet case
-                // was the one with no conflict.
-                //
-                // Skipping the tablet's motion for that sample is invisible: the mapper still
-                // tracks the position, so the pen resumes from the right place the moment
-                // scrolling stops, and this path is only reachable while hovering, so no touch
-                // or pressure state can be affected.
-                let scrolling = !*stroke_active && !report.other_relative.is_empty();
-
                 let tablet = self.tablets.active().ensure()?;
-                if !scrolling {
-                    tablet.pen(x, y, sample.pressure.unwrap_or(0.0), *stroke_active);
+                tablet.pen(x, y, sample.pressure.unwrap_or(0.0), *stroke_active);
+
+                // **The wheel goes out the tablet itself**, not a second device.
+                //
+                // Krita discards mouse input while a pen is in proximity — the standard
+                // defence against drivers that synthesise mouse events from tablet events —
+                // and a separate virtual mouse is indistinguishable from exactly that. The
+                // suppression is time-based, which is why scrolling worked only while the pen
+                // was still: a stationary pen emits nothing, so the window expired. Blender
+                // does not filter this way, which is why it was never affected.
+                //
+                // From the tablet there is no second device to be suspicious of. A real tablet
+                // carries a ring or dial the same way, and P9 verified the device keeps its
+                // tablet classification with the axes attached.
+                //
+                // Still hover-only: with the pen down the wheel belongs to `pressure.manual`.
+                if !*stroke_active {
+                    for (code, value) in &report.other_relative {
+                        tablet.wheel(*code, *value);
+                    }
                 }
+
                 for (code, pressed) in &report.keys {
                     // Right and middle also become barrel buttons, for applications that read
                     // them as such.
@@ -895,49 +897,29 @@ impl Runtime {
                 }
                 tablet.flush()?;
 
-                // Neither the wheel nor a button can reach an application through the pen:
-                // KWin turns a tip into a click only behind a deprecated environment variable
-                // (D18), and a pen carries no wheel at all. Both therefore go through the
-                // absolute pointer, placed on the pen's position first — the pixel the cursor
-                // already occupies, so nothing visibly moves and the scroll lands under
-                // whatever the user is pointing at.
+                // A pen tip cannot press anything outside a tablet-aware application: KWin
+                // turns one into a click only behind a deprecated environment variable (D18).
+                // So buttons are mirrored onto the absolute pointer, placed on the pen's
+                // position first — the pixel the cursor already occupies, so nothing visibly
+                // moves and the press lands where the user is pointing.
                 //
-                // **Wheel passes through only while hovering.** With the pen down the wheel is
-                // not scroll: it is the input to `pressure.manual` (stages.md), which is
-                // specified as active only during a stroke. Reserving it now means building
-                // that term cannot make one notch do two things at once — and scrolling
-                // mid-stroke is meaningless anyway, since the hand is drawing.
-                //
-                // Clicks stay behind `tablet_emits_mouse_clicks` because an application that
-                // reads both tablet and mouse buttons would see one press twice. The wheel has
-                // no such hazard — the pen has no wheel to double with — so it is unconditional.
-                let wheel: &[(u16, i32)] = if *stroke_active {
-                    &[]
-                } else {
-                    &report.other_relative
-                };
-                let clicks: &[(u16, bool)] = if self.tablet_clicks { &report.keys } else { &[] };
-                if !wheel.is_empty() || !clicks.is_empty() {
+                // Behind `tablet_emits_mouse_clicks` because an application reading both
+                // tablet and mouse buttons would see one press twice. The wheel needs no such
+                // gate and no longer comes through here at all — it leaves by the tablet.
+                if self.tablet_clicks && !report.keys.is_empty() {
                     let at = self.tablets.position_px();
                     match (self.pointer.as_mut(), at) {
                         (Some(pointer), Some((px, py))) => {
                             pointer.position(px, py);
-                            for (code, value) in wheel {
-                                pointer.relative(*code, *value);
-                            }
-                            for (code, pressed) in clicks {
+                            for (code, pressed) in &report.keys {
                                 pointer.key(*code, *pressed);
                             }
                             pointer.flush()?;
                         }
                         _ => {
-                            // No absolute pointer. The wheel still works — scrolling needs no
-                            // position, only focus — while clicks keep the old wrong-position
-                            // behaviour, since a press somewhere beats no press anywhere.
-                            for (code, value) in wheel {
-                                self.mouse.relative(*code, *value);
-                            }
-                            for (code, pressed) in clicks {
+                            // No absolute pointer: the old wrong-position behaviour, since a
+                            // press somewhere still beats no press anywhere.
+                            for (code, pressed) in &report.keys {
                                 self.mouse.key(*code, *pressed);
                             }
                             self.mouse.flush()?;

@@ -8,7 +8,7 @@
 use crate::{Error, Result};
 use evdev::{
     uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent,
-    KeyCode, UinputAbsSetup,
+    KeyCode, RelativeAxisCode, UinputAbsSetup,
 };
 use std::path::PathBuf;
 
@@ -72,10 +72,31 @@ impl TabletSink {
         let y_axis = AbsInfo::new(0, 0, max_y, 0, 0, RESOLUTION);
         let pressure = AbsInfo::new(0, 0, PRESSURE_MAX, 0, 0, 0);
 
+        // **The tablet carries its own wheel**, the way a real one carries a ring or a dial.
+        //
+        // Krita discards wheel events that arrive while a pen is in proximity — the standard
+        // defence against drivers that synthesise mouse input from tablet input, which would
+        // otherwise double every action. Our wheel used to come from a separate virtual mouse,
+        // which Krita cannot distinguish from exactly that, so scrolling worked only while the
+        // pen held still and the suppression window had expired.
+        //
+        // Coming from the tablet itself, there is no second device to be suspicious of.
+        // Verified before relying on it (probe P9): a tablet keeps `ID_INPUT_TABLET` and stays
+        // listed by KWin as a tablet tool with these axes attached — the failure that would
+        // have mattered, since losing the classification would stop drawing altogether.
+        let mut wheels = AttributeSet::<RelativeAxisCode>::new();
+        wheels.insert(RelativeAxisCode::REL_WHEEL);
+        // Hi-res as well: whole-notch scrolling feels broken for anything continuous, and a
+        // device cannot gain an axis later without being recreated under a new identity.
+        wheels.insert(RelativeAxisCode::REL_WHEEL_HI_RES);
+        wheels.insert(RelativeAxisCode::REL_HWHEEL);
+        wheels.insert(RelativeAxisCode::REL_HWHEEL_HI_RES);
+
         let device = VirtualDevice::builder()
             .and_then(|b| {
                 b.name(name)
                     .with_keys(&keys)
+                    .and_then(|b| b.with_relative_axes(&wheels))
                     .and_then(|b| {
                         b.with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, x_axis))
                     })
@@ -189,6 +210,17 @@ impl TabletSink {
         };
         self.pending
             .push(InputEvent::new(EventType::KEY.0, code, i32::from(pressed)));
+    }
+
+    /// Queue a wheel event verbatim — wheel, hi-res wheel, horizontal pan.
+    ///
+    /// Emitted by the tablet rather than by a separate pointer so that an application
+    /// filtering mouse input during pen proximity still receives it. See `with_extent`.
+    pub fn wheel(&mut self, code: u16, value: i32) {
+        if value != 0 {
+            self.pending
+                .push(InputEvent::new(EventType::RELATIVE.0, code, value));
+        }
     }
 
     /// Lift the pen out of proximity, used when tablet output is left.

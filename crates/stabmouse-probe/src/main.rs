@@ -15,6 +15,7 @@ mod recreate;
 mod tap;
 mod passthrough;
 mod tablet;
+mod tabletwheel;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -52,6 +53,8 @@ enum Command {
     /// Internal: grab a device and hold it until killed. Used by `grabrelease`.
     #[command(hide = true)]
     Grabhold(grabrelease::HoldArgs),
+    /// Check whether a tablet keeps its classification once a wheel is added.
+    Tabletwheel(tabletwheel::Args),
 }
 
 fn main() -> Result<()> {
@@ -67,6 +70,7 @@ fn main() -> Result<()> {
         Command::Abspointer(args) => abspointer::run(args),
         Command::Grabrelease(args) => grabrelease::run(args),
         Command::Grabhold(args) => grabrelease::hold(args),
+        Command::Tabletwheel(args) => tabletwheel::run(args),
     }
 }
 
