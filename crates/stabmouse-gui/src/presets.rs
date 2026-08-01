@@ -322,9 +322,11 @@ pub fn write_param_text(
 pub fn write_param(path: &Path, stage_index: usize, key: &str, value: f64) -> anyhow::Result<()> {
     let mut doc: Document<Preset> = Document::load(path)?;
 
-    // Integers stay integers. Writing `dpi = 1600.0` into a file that said `1600` is a
-    // gratuitous diff, and the point of the format-preserving editor is that the file still
-    // looks like the one the user wrote.
+    // Integers stay integers *only while the value still is one*. Writing `dpi = 1600.0` into
+    // a file that said `1600` is a gratuitous diff — but rounding to keep the shape destroys
+    // the value, and it did: a parameter written once as `7` swallowed every fraction after
+    // it, so 0.1 was stored as 0 and read back as the stage's fallback. Tidiness must never
+    // outrank the number.
     let was_integer = doc
         .data()
         .stages
@@ -332,7 +334,8 @@ pub fn write_param(path: &Path, stage_index: usize, key: &str, value: f64) -> an
         .and_then(|s| s.params.get(key))
         .is_some_and(|v| v.is_integer());
 
-    let value = if was_integer && value.is_finite() && value.abs() < 1e15 {
+    let value = if was_integer && value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15
+    {
         toml::Value::Integer(value.round() as i64)
     } else {
         toml::Value::Float(value)
@@ -435,6 +438,22 @@ catch_up = 0.35
         let loaded = load_one(&p).unwrap();
         let raw = &loaded.stages[0].params.iter().find(|q| q.key == "modifier").unwrap().raw;
         assert_eq!(binding_names(raw).len(), 1, "case-insensitively the same button");
+    }
+
+    #[test]
+    fn a_fraction_written_over_an_integer_survives() {
+        // Keeping the file tidy must never cost the value. A parameter first written as `7`
+        // rounded every later fraction to a whole number, so 0.1 became 0 and the stage fell
+        // back to its default — which read as small values simply not working.
+        let p = write_temp("fraction", "schema = 1\n[[stage]]\ntype = \"scroll\"\nspeed = 7\n");
+        write_param(&p, 0, "speed", 0.1).unwrap();
+        let loaded = load_one(&p).unwrap();
+        let v = loaded.stages[0].params.iter().find(|q| q.key == "speed").unwrap();
+        assert!((v.value - 0.1).abs() < 1e-9, "stored {}", v.value);
+
+        // ...and a whole number still writes as one, so the tidiness is not lost either.
+        write_param(&p, 0, "speed", 3.0).unwrap();
+        assert!(std::fs::read_to_string(&p).unwrap().contains("speed = 3"));
     }
 
     #[test]

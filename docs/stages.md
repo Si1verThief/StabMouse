@@ -294,8 +294,8 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | `passthrough` | bool | Let the bound button keep its ordinary job as well |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
-| `drag.mm_per_unit` | f64 | Hand travel per scroll unit |
-| `drag.invert` | bool | Natural versus traditional |
+| `speed` | f64 | Notches per millimetre of hand travel. Higher is faster |
+| `drag_invert` | bool | Natural versus traditional |
 | `joystick.deadzone_mm` | f64 | Displacement before scrolling starts |
 | `joystick.gain` | f64 | Scroll rate per mm of displacement |
 | `hi_res` | bool | Emit `REL_WHEEL_HI_RES` — always on, see below |
@@ -335,6 +335,19 @@ But that is a cost for the user to weigh, not for the stage to refuse: **`freeze
 honoured by every mode**, joystick included. A mode that quietly ignores a switch is worse
 than one that lets you make a hard choice — and an on-screen indicator would make a frozen
 joystick perfectly steerable.
+
+**Speed is notches per millimetre, not millimetres per notch.** The inverse reads
+backwards — a number that got smaller as the thing it controlled got faster — and notches
+mean little to anyone who has not read the kernel's input documentation. The old
+`drag_mm_per_unit` is still accepted and converted.
+
+**Emission is rate-limited to 8ms.** A gesture can produce a scroll on every sample and a
+real mouse never does: a wheel emits a handful of events a second, while a swipe at 1000Hz
+would emit a thousand, each carrying a sliver. Applications that do real work per wheel
+event cannot keep up — measured in use, Google Search and Maps stayed smooth while YouTube
+and WhatsApp stuttered, which is the signature of the *handler* being the bottleneck rather
+than the scrolling. Fewer, larger events fix it, and nothing is dropped: whatever accrues
+between emissions is carried into the next.
 
 **`full_release_stops_momentum`** gives a flick a brake without a second binding. With a
 chord — `KEY_LEFTALT+BTN_MIDDLE` — holding both steers, releasing one leaves the page

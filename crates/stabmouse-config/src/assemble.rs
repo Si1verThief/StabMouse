@@ -202,7 +202,10 @@ fn build_scroll(p: &mut Params) -> Scroll {
         }
     };
     let mut scroll = Scroll::new(mode);
-    scroll.mm_per_unit = p.f64("drag_mm_per_unit", scroll.mm_per_unit);
+    // The old key said millimetres per notch — the inverse, and backwards to read. Still
+    // accepted so an existing preset keeps working, converted rather than ignored.
+    let legacy = p.opt_f64("drag_mm_per_unit").filter(|v| v.is_finite() && *v > 0.0);
+    scroll.speed = p.f64("speed", legacy.map_or(scroll.speed, |mm| 1.0 / mm));
     scroll.invert = p.bool("drag_invert", scroll.invert);
     scroll.deadzone_mm = p.f64("joystick_deadzone_mm", scroll.deadzone_mm);
     scroll.gain = p.f64("joystick_gain", scroll.gain);

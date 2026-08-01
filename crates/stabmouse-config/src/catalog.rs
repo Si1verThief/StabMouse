@@ -428,17 +428,16 @@ pub const STAGES: &[StageSpec] = &[
             ),
             when(
                 f(
-                "drag_mm_per_unit",
-                "Distance per notch",
-                "mm",
-                4.0,
-                0.5,
-                20.0,
-                2,
-                "Hand travel per scroll notch. Larger scrolls slower — and with the cursor \
-                 unfrozen this is what decides whether the page keeps pace with the pointer. \
-                 The slider stops at 0.5 because below that a hand's width is already pages; \
-                 the field still takes anything, and small values do work.",
+                    "speed",
+                    "Scroll speed",
+                    "",
+                    0.25,
+                    0.02,
+                    4.0,
+                    3,
+                    "How far the page moves for a given hand movement. Higher is faster — and \
+                     with the cursor unfrozen this is what decides whether the page keeps pace \
+                     with the pointer, which is somewhere near 0.1 on a typical screen.",
                 ),
                 "mode",
                 "drag",

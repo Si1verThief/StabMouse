@@ -48,8 +48,12 @@ pub enum Mode {
 pub struct Scroll {
     enabled: bool,
     pub mode: Mode,
-    /// Hand travel per notch in `drag`. Larger means slower scrolling.
-    pub mm_per_unit: f64,
+    /// Scroll notches per millimetre of hand travel. Larger is faster.
+    ///
+    /// The inverse of the distance-per-notch this used to take. Notches mean little to
+    /// anyone who has not read the kernel's input docs, and a number that got *smaller* as
+    /// the thing it controlled got *faster* was one more thing to hold backwards.
+    pub speed: f64,
     pub invert: bool,
     /// Displacement before `joystick` starts moving, so resting a hand does not creep.
     pub deadzone_mm: f64,
@@ -113,9 +117,9 @@ impl Scroll {
         Self {
             enabled: true,
             mode,
-            // A notch every 4mm: about a finger's width of travel, close to how far a
-            // touchscreen swipe moves content per unit of hand movement.
-            mm_per_unit: 4.0,
+            // A notch every 4mm of travel — about a finger's width, close to how far a
+            // touchscreen swipe moves content for a given hand movement.
+            speed: 0.25,
             invert: false,
             // Below this a resting hand's tremor would creep the page.
             deadzone_mm: 2.0,
@@ -261,15 +265,15 @@ impl Stage for Scroll {
 
         match self.mode {
             Mode::Drag => {
-                let per_unit = if self.mm_per_unit.is_finite() && self.mm_per_unit > 0.0 {
-                    self.mm_per_unit
+                let speed = if self.speed.is_finite() && self.speed > 0.0 {
+                    self.speed
                 } else {
-                    4.0
+                    0.25
                 };
                 // Scrolling *content*: pulling down brings the page up, which is why the
                 // vertical term is negated before `invert` is applied.
-                produced_x = s.dx / per_unit * sign;
-                produced_y = -s.dy / per_unit * sign;
+                produced_x = s.dx * speed * sign;
+                produced_y = -s.dy * speed * sign;
                 self.coasting = false;
             }
             Mode::Joystick => {
@@ -384,7 +388,7 @@ mod tests {
     #[test]
     fn dragging_scrolls_by_distance_and_eats_the_motion() {
         let mut stage = Scroll::new(Mode::Drag);
-        stage.mm_per_unit = 4.0;
+        stage.speed = 0.25;
         // 16mm downward: four notches, and the page goes the other way.
         let (_, sy, mx, my) = feed(&mut stage, &[(0.0, 4.0, true); 4]);
         assert!((sy + 4.0).abs() < 1e-9, "dragging down scrolls content up: {sy}");
@@ -396,7 +400,7 @@ mod tests {
         // The accumulation hazard from modules.md: thresholding a per-sample value when the
         // quantity accumulates. Sub-notch samples must bank, not vanish.
         let mut stage = Scroll::new(Mode::Drag);
-        stage.mm_per_unit = 4.0;
+        stage.speed = 0.25;
         let (_, sy, _, _) = feed(&mut stage, &[(0.0, 0.05, true); 80]);
         assert!((sy + 1.0).abs() < 1e-9, "80 x 0.05mm is one notch: {sy}");
     }
@@ -593,7 +597,7 @@ mod tests {
     fn nothing_panics_on_pathological_input() {
         for mode in [Mode::Drag, Mode::Joystick] {
             let mut stage = Scroll::new(mode);
-            stage.mm_per_unit = f64::NAN;
+            stage.speed = f64::NAN;
             stage.gain = f64::INFINITY;
             stage.deadzone_mm = -1.0;
             for (dx, dy) in [(0.0, 0.0), (f64::NAN, 1.0), (1e300, -1e300), (0.1, 0.1)] {

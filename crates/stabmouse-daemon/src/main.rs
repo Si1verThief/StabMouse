@@ -632,6 +632,7 @@ fn run(
         capture_chord: Vec::new(),
         capture_down: 0,
         scroll_carry: Default::default(),
+        last_scroll_emit: std::time::Instant::now(),
         inert: false,
     };
 

@@ -141,6 +141,8 @@ pub struct Runtime {
     /// the accumulation hazard from modules.md: at 1000Hz every step is far below a notch, so
     /// a slow drag would scroll nothing at all.
     pub scroll_carry: ScrollCarry,
+    /// When a scroll event last left, so a gesture emits at a rate an application can follow.
+    pub last_scroll_emit: Instant,
     pub last_tablet_xy: (i32, i32),
     /// State the D-Bus service reads. Written here, never read by the loop itself.
     pub published: crate::service::Published,
@@ -216,6 +218,20 @@ impl ScrollOut {
 
 /// Hi-res wheel units per notch, fixed by the kernel's `REL_WHEEL_HI_RES` contract.
 const HI_RES_PER_NOTCH: f64 = 120.0;
+
+/// Shortest interval between scroll events a gesture will emit.
+///
+/// **A gesture can produce a scroll on every sample, and a mouse never does.** A real wheel
+/// emits a handful of events a second — one per notch, or a few dozen hi-res steps — while a
+/// swipe at 1000Hz would emit a thousand, each carrying a sliver. Pages that do real work per
+/// wheel event cannot keep up: measured in use, Google Search and Maps stayed smooth while
+/// YouTube and WhatsApp stuttered, which is the signature of the *handler* being the
+/// bottleneck rather than the scrolling.
+///
+/// So the gesture accumulates and emits fewer, larger events. 8ms is faster than any display
+/// refreshes, so nothing is lost visually, and it cuts the event rate by roughly eight.
+/// Nothing is dropped: whatever accrues between emissions is carried into the next one.
+const SCROLL_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Which signal a state change should announce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -725,14 +741,24 @@ impl Runtime {
     /// anything that has not been updated for hi-res.
     fn take_scroll(&mut self, sample: &Sample) -> ScrollOut {
         let (sx, sy) = (sample.scroll_x, sample.scroll_y);
-        if !sx.is_finite() || !sy.is_finite() || (sx == 0.0 && sy == 0.0) {
+        if sx.is_finite() && sy.is_finite() {
+            let c = &mut self.scroll_carry;
+            c.notch_x += sx;
+            c.notch_y += sy;
+            c.hi_x += sx * HI_RES_PER_NOTCH;
+            c.hi_y += sy * HI_RES_PER_NOTCH;
+        }
+
+        // Accumulate freely, emit rarely. Everything owed stays in the carry until it is sent.
+        if self.last_scroll_emit.elapsed() < SCROLL_INTERVAL {
             return ScrollOut::default();
         }
         let c = &mut self.scroll_carry;
-        c.notch_x += sx;
-        c.notch_y += sy;
-        c.hi_x += sx * HI_RES_PER_NOTCH;
-        c.hi_y += sy * HI_RES_PER_NOTCH;
+        if c.notch_x == 0.0 && c.notch_y == 0.0 && c.hi_x == 0.0 && c.hi_y == 0.0 {
+            return ScrollOut::default();
+        }
+        self.last_scroll_emit = Instant::now();
+        let c = &mut self.scroll_carry;
 
         fn take(carry: &mut f64) -> i32 {
             let whole = carry.trunc();
