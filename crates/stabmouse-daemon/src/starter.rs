@@ -49,11 +49,16 @@ schema = 1
 [defaults]
 profile = "default"
 
-# Whether an application can receive tablet input, by window class. This corrects the automatic
-# detection, which reads the toolkit the application loaded (Qt, GTK, SDL3, or X11 under
-# XWayland — all of which take a pen) and sends everything it cannot prove to the pointer.
-# The main reason to add an entry: promoting a Chromium-based browser whose build is known to
-# support the pen, since that cannot be detected from outside.
+# Whether an application can receive tablet input, by window class. The pen goes to a built-in
+# list of drawing applications, and to anything running under XWayland — where X emulates
+# ordinary clicks from tablet input, so it is safe whatever the program knows about pens.
+# Everything else gets the pointer.
+#
+# That is deliberately narrow. On Wayland nothing bridges pointer and tablet input, so an
+# application handed a pen it does not handle receives nothing at all — no hover, no clicks —
+# while its cursor moves normally. Being wrong toward the pen costs every click in that window.
+#
+# Add an entry to promote an application that does handle a pen, or to demote one that does not.
 #
 # `stabmouse-probe focus` prints the classes as they are actually reported. Use those exactly.
 #
@@ -195,6 +200,17 @@ default_mode = 1
 #
 # The cost: anything launched while the tablet is absent gets no pressure until restarted.
 # destroy_tablet_on_leave = true
+
+# Any preset can turn a held button into scrolling — a touchscreen-style swipe, or
+# middle-click autoscroll the way Windows and browsers do it:
+#
+#   [[stage]]
+#   type = "scroll"
+#   mode = "joystick"        # or "drag" for swipe-style
+#   button = "BTN_MIDDLE"
+#   latch = true             # joystick: click to start, click again to stop
+#
+# While the gesture is held the cursor stays put and the movement scrolls instead.
 
 # A drawing preset can constrain strokes to straight lines while a modifier is held — add a
 # snap stage to a preset and bind it:

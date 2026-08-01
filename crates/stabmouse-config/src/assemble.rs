@@ -12,7 +12,7 @@ use crate::cascade::DeviceView;
 use crate::schema::{Preset, StageEntry};
 use stabmouse_core::stages::{
     Average, Constraint, Curve, Deadzone, Normalize, Pressure, Rotate, Sensitivity, Smooth,
-    Snap, SpeedSource, Weighting,
+    Scroll, ScrollMode, Snap, SpeedSource, Weighting,
     StallBehaviour, Stabilize,
 };
 use stabmouse_core::{Pipeline, Stage};
@@ -20,9 +20,10 @@ use std::collections::BTreeSet;
 
 /// Stages that are specified but not yet implemented in core.
 ///
-/// Listed explicitly so a preset referencing one gets an honest "not implemented yet"
-/// rather than a silent omission that leaves the user wondering why nothing changed.
-const PLANNED: &[&str] = &["scroll"];
+/// Empty: every stage in docs/stages.md is built. Kept because the mechanism — an honest
+/// "not implemented yet" rather than a silent omission — is what a reader of a spec-first
+/// project needs the moment the spec grows again.
+const PLANNED: &[&str] = &[];
 
 pub struct Assembly {
     pub pipeline: Pipeline,
@@ -82,6 +83,7 @@ pub fn assemble(preset: &Preset, slug: &str, view: Option<&DeviceView<'_>>) -> A
             ))),
             "average" => Some(Box::new(build_average(&mut p))),
             "snap" => Some(Box::new(build_snap(&mut p))),
+            "scroll" => Some(Box::new(build_scroll(&mut p))),
             "pressure" => Some(Box::new(build_pressure(&mut p))),
             other => {
                 if PLANNED.contains(&other) {
@@ -188,6 +190,30 @@ fn build_snap(p: &mut Params) -> Snap {
     let _ = p.str("modifier", "");
 
     Snap::new(constraint, p.f64("strength", 1.0), needs_modifier)
+}
+
+fn build_scroll(p: &mut Params) -> Scroll {
+    // Off is the identity, so a stage named without parameters does nothing rather than
+    // silently swallowing motion the moment a button is pressed.
+    let mode = match p.str("mode", "off").as_str() {
+        "off" => ScrollMode::Off,
+        "drag" => ScrollMode::Drag,
+        "joystick" => ScrollMode::Joystick,
+        other => {
+            p.warn(format!("unknown scroll mode '{other}'; using off"));
+            ScrollMode::Off
+        }
+    };
+    let mut scroll = Scroll::new(mode);
+    scroll.mm_per_unit = p.f64("drag_mm_per_unit", scroll.mm_per_unit);
+    scroll.invert = p.bool("drag_invert", scroll.invert);
+    scroll.deadzone_mm = p.f64("joystick_deadzone_mm", scroll.deadzone_mm);
+    scroll.gain = p.f64("joystick_gain", scroll.gain);
+    scroll.latch = p.bool("latch", scroll.latch);
+    // Resolved by the daemon, for the same reason `snap.modifier` is: turning a name into an
+    // evdev code is platform work, and this crate builds for wasm and PyO3.
+    let _ = p.str("button", "");
+    scroll
 }
 
 fn build_sensitivity(p: &mut Params) -> Sensitivity {
@@ -447,16 +473,39 @@ mod tests {
     }
 
     #[test]
-    fn a_planned_but_unimplemented_stage_says_so_specifically() {
-        let p = preset_from("[[stage]]\ntype = \"scroll\"\n");
+    fn every_stage_in_the_spec_is_built() {
+        // `PLANNED` is empty, so nothing in docs/stages.md should report itself missing. This
+        // is what catches a stage being named in the spec and quietly never wired up.
+        for kind in [
+            "normalize", "rotate", "deadzone", "sensitivity", "smooth", "stabilize", "average",
+            "snap", "scroll", "pressure",
+        ] {
+            let p = preset_from(&format!("[[stage]]\ntype = \"{kind}\"\n"));
+            let a = assemble(&p, "all", None);
+            assert!(a.warnings.is_empty(), "{kind}: {:?}", a.warnings);
+            assert!(a.pipeline.stage_names().any(|n| n == kind), "{kind} was not built");
+        }
+    }
+
+    #[test]
+    fn a_stage_nobody_has_heard_of_is_still_reported() {
+        let p = preset_from("[[stage]]\ntype = \"telekinesis\"\n");
         let a = assemble(&p, "future", None);
         assert!(
-            a.warnings
-                .iter()
-                .any(|w| w.contains("not implemented yet")),
+            a.warnings.iter().any(|w| w.contains("unknown stage")),
             "{:?}",
             a.warnings
         );
+    }
+
+    #[test]
+    fn scroll_takes_its_binding_without_complaint() {
+        let p = preset_from(
+            "[[stage]]\ntype = \"scroll\"\nmode = \"joystick\"\nbutton = \"BTN_MIDDLE\"\n\
+             joystick_gain = 2.0\nlatch = true\n",
+        );
+        let a = assemble(&p, "browse", None);
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
     }
 
     #[test]

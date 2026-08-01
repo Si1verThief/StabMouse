@@ -14,6 +14,8 @@ pub struct Mode {
     /// Built up front. Switching is an index change, never a config load — the pipeline for
     /// every slot is resident before the hotkey is ever pressed.
     pub pipeline: Pipeline,
+    /// evdev code of this mode's scroll-gesture button, when its preset binds one.
+    pub scroll_button: Option<u16>,
     /// evdev code of this mode's constrain modifier, when its preset binds one.
     ///
     /// Resolved once at build time rather than per sample: the name-to-code lookup is a string
@@ -212,6 +214,7 @@ mod tests {
                 preset: "raw".into(),
                 pipeline: Pipeline::new(vec![]),
                 modifier: None,
+                scroll_button: None,
             })
             .collect();
         Modes::new(slots, 0)

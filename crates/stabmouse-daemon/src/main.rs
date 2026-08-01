@@ -552,7 +552,8 @@ fn run(
     let keyboard_codes: Vec<u16> = modes
         .slots()
         .iter()
-        .filter_map(|m| m.modifier)
+        .flat_map(|m| [m.modifier, m.scroll_button])
+        .flatten()
         .filter(|c| !stabmouse_input::is_mouse_button(*c))
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
@@ -620,6 +621,7 @@ fn run(
             store.startup_profile().map_or(250, |p| p.scroll_freeze_ms),
         ),
         frozen_until: None,
+        scroll_carry: Default::default(),
         inert: false,
     };
 
@@ -727,6 +729,7 @@ fn build_modes(
             preset: stabmouse_config::RAW.into(),
             pipeline: stabmouse_core::Pipeline::new(vec![]),
             modifier: None,
+            scroll_button: None,
         }];
     };
 
@@ -749,6 +752,7 @@ fn build_modes(
                 preset: m.preset.clone(),
                 pipeline: stabmouse_core::Pipeline::new(vec![]),
                 modifier: None,
+                scroll_button: None,
             });
             continue;
         };
@@ -772,24 +776,33 @@ fn build_modes(
             output: m.output,
             preset: m.preset.clone(),
             pipeline: assembly.pipeline,
-            modifier: snap_modifier(preset, &m.preset),
+            modifier: stage_binding(preset, &m.preset, "snap", "modifier"),
+            scroll_button: stage_binding(preset, &m.preset, "scroll", "button"),
         });
     }
     out
 }
 
-/// The constrain modifier a preset's `snap` stage binds, if any.
+/// A key or button a preset's stage binds, resolved to an evdev code.
 ///
-/// Read from the raw preset rather than from the assembled pipeline: resolving a name to an
-/// evdev code is platform work, and `stabmouse-config` builds for wasm and PyO3 where no such
-/// table exists. The stage knows *whether* it waits for a modifier; the daemon knows *which*.
-fn snap_modifier(preset: &stabmouse_config::Preset, slug: &str) -> Option<u16> {
-    let entry = preset.stages.iter().find(|s| s.kind == "snap")?;
-    let name = entry.params.get("modifier")?.as_str()?;
+/// Read from the raw preset rather than from the assembled pipeline: turning a name into a
+/// code is platform work, and `stabmouse-config` builds for wasm and PyO3 where no such table
+/// exists. A stage knows *whether* it waits for a binding; the daemon knows *which*.
+fn stage_binding(
+    preset: &stabmouse_config::Preset,
+    slug: &str,
+    stage: &str,
+    param: &str,
+) -> Option<u16> {
+    let entry = preset.stages.iter().find(|s| s.kind == stage)?;
+    let name = entry.params.get(param)?.as_str()?;
     match stabmouse_input::code_for(name) {
         Some(code) => Some(code),
         None => {
-            eprintln!("preset '{slug}': '{name}' is not a key or button name; snap will not engage");
+            eprintln!(
+                "preset '{slug}': '{name}' is not a key or button name; \
+                 {stage} will not engage"
+            );
             None
         }
     }

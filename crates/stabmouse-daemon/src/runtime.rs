@@ -114,6 +114,13 @@ pub struct Runtime {
     pub scroll_freeze: Duration,
     /// When the current freeze ends, if one is running.
     pub frozen_until: Option<Instant>,
+    /// Fractional scroll owed to each wheel axis, kept separately per resolution.
+    ///
+    /// The `scroll` stage produces fractional notches, and both wheel axes are integers with
+    /// *different* scales — whole notches and 120ths. Truncating each sample independently is
+    /// the accumulation hazard from modules.md: at 1000Hz every step is far below a notch, so
+    /// a slow drag would scroll nothing at all.
+    pub scroll_carry: ScrollCarry,
     pub last_tablet_xy: (i32, i32),
     /// State the D-Bus service reads. Written here, never read by the loop itself.
     pub published: crate::service::Published,
@@ -158,6 +165,33 @@ pub struct Reloaded {
     pub scroll_freeze_ms: u64,
     pub scroll_freeze: Vec<(String, bool)>,
 }
+
+/// Fractional scroll owed, per axis and per resolution.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrollCarry {
+    notch_x: f64,
+    notch_y: f64,
+    hi_x: f64,
+    hi_y: f64,
+}
+
+/// Whole-wheel and hi-res values to emit for one report.
+#[derive(Debug, Clone, Copy, Default)]
+struct ScrollOut {
+    notch_x: i32,
+    notch_y: i32,
+    hi_x: i32,
+    hi_y: i32,
+}
+
+impl ScrollOut {
+    fn any(&self) -> bool {
+        self.notch_x != 0 || self.notch_y != 0 || self.hi_x != 0 || self.hi_y != 0
+    }
+}
+
+/// Hi-res wheel units per notch, fixed by the kernel's `REL_WHEEL_HI_RES` contract.
+const HI_RES_PER_NOTCH: f64 = 120.0;
 
 /// Which signal a state change should announce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,6 +649,44 @@ impl Runtime {
         self.published.announce(crate::service::Announce::Degraded);
     }
 
+    /// Turn the pipeline's fractional scroll into whole wheel and hi-res values.
+    ///
+    /// Both resolutions carry their own remainder because they are different quantities: a
+    /// notch's worth of hi-res motion has already been reported by the time a whole notch is
+    /// owed, and sharing one accumulator would make each starve the other.
+    ///
+    /// Applications read whichever they understand. Emitting both is what every real mouse
+    /// with a hi-res wheel does, and omitting the coarse one loses scrolling entirely in
+    /// anything that has not been updated for hi-res.
+    fn take_scroll(&mut self, sample: &Sample) -> ScrollOut {
+        let (sx, sy) = (sample.scroll_x, sample.scroll_y);
+        if !sx.is_finite() || !sy.is_finite() || (sx == 0.0 && sy == 0.0) {
+            return ScrollOut::default();
+        }
+        let c = &mut self.scroll_carry;
+        c.notch_x += sx;
+        c.notch_y += sy;
+        c.hi_x += sx * HI_RES_PER_NOTCH;
+        c.hi_y += sy * HI_RES_PER_NOTCH;
+
+        fn take(carry: &mut f64) -> i32 {
+            let whole = carry.trunc();
+            if !whole.is_finite() {
+                *carry = 0.0;
+                return 0;
+            }
+            *carry -= whole;
+            whole.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+        }
+
+        ScrollOut {
+            notch_x: take(&mut c.notch_x),
+            notch_y: take(&mut c.notch_y),
+            hi_x: take(&mut c.hi_x),
+            hi_y: take(&mut c.hi_y),
+        }
+    }
+
     /// A switch the user asked for. Only ever called from command handling, which is what
     /// makes it the right place to record that a rule has been overruled.
     fn act(&mut self, action: Action, stats: &mut Stats, stroke_active: bool) {
@@ -843,9 +915,19 @@ impl Runtime {
     /// listener. A mode that binds nothing is never constrained, which is what makes `snap`
     /// with `activation = "modifier"` and no binding inert rather than stuck on.
     fn constrain_held(&self) -> bool {
-        let Some(code) = self.modes.current().and_then(|m| m.modifier) else {
-            return false;
-        };
+        self.binding_held(self.modes.current().and_then(|m| m.modifier))
+    }
+
+    /// Whether the current mode's scroll-gesture button is held.
+    fn scroll_held(&self) -> bool {
+        self.binding_held(self.modes.current().and_then(|m| m.scroll_button))
+    }
+
+    /// A mouse button is answered from the grabbed device's own state; a keyboard key from
+    /// the listener. A binding of `None` is never held, which is what makes a stage that
+    /// waits for one inert rather than stuck on when nothing is bound.
+    fn binding_held(&self, code: Option<u16>) -> bool {
+        let Some(code) = code else { return false };
         if stabmouse_input::is_mouse_button(code) {
             self.buttons_held.contains(&code)
         } else {
@@ -906,6 +988,7 @@ impl Runtime {
 
         // Read before the mutable borrow of the mode below.
         let constrain = self.constrain_held();
+        let scrolling = self.scroll_held();
 
         let Some(mode) = self.modes.current_mut() else {
             return Ok(());
@@ -918,7 +1001,12 @@ impl Runtime {
             *stroke_active,
         );
         sample.constrain = constrain;
+        sample.scrolling = scrolling;
         mode.pipeline.process(&mut sample);
+
+        // The `scroll` stage turns held motion into scroll and consumes the motion, so a
+        // gesture reaches the sinks as wheel events rather than as cursor movement.
+        let gesture = self.take_scroll(&sample);
 
         match output {
             Output::Mouse => {
@@ -959,6 +1047,7 @@ impl Runtime {
                         for (code, value) in &report.other_relative {
                             pointer.relative(*code, *value);
                         }
+                        emit_scroll(gesture, |code, value| pointer.relative(code, value));
                         for (code, pressed) in &report.keys {
                             pointer.key(*code, *pressed);
                         }
@@ -989,10 +1078,12 @@ impl Runtime {
                 }
                 self.mouse.motion(dx, dy);
                 // Wheel and buttons bypass the filters: they are not pointer motion, and
-                // reinterpreting them as such would be wrong.
+                // reinterpreting them as such would be wrong. The `scroll` stage's output is
+                // the exception — it *is* filtered, being motion the pipeline reinterpreted.
                 for (code, value) in &report.other_relative {
                     self.mouse.relative(*code, *value);
                 }
+                emit_scroll(gesture, |code, value| self.mouse.relative(code, value));
                 for (code, pressed) in &report.keys {
                     self.mouse.key(*code, *pressed);
                 }
@@ -1018,6 +1109,7 @@ impl Runtime {
                 for (code, value) in &report.other_relative {
                     self.mouse.relative(*code, *value);
                 }
+                emit_scroll(gesture, |code, value| self.mouse.relative(code, value));
                 for (code, pressed) in &report.keys {
                     self.mouse.key(*code, *pressed);
                 }
@@ -1118,7 +1210,7 @@ impl Runtime {
                     &report.other_relative
                 };
                 let clicks: &[(u16, bool)] = if self.tablet_clicks { &report.keys } else { &[] };
-                if !wheel.is_empty() || !clicks.is_empty() {
+                if !wheel.is_empty() || !clicks.is_empty() || gesture.any() {
                     let at = self.tablets.position_px();
                     match (self.pointer.as_mut(), at) {
                         (Some(pointer), Some((px, py))) => {
@@ -1126,6 +1218,7 @@ impl Runtime {
                             for (code, value) in wheel {
                                 pointer.relative(*code, *value);
                             }
+                            emit_scroll(gesture, |code, value| pointer.relative(code, value));
                             for (code, pressed) in clicks {
                                 pointer.key(*code, *pressed);
                             }
@@ -1138,6 +1231,7 @@ impl Runtime {
                             for (code, value) in wheel {
                                 self.mouse.relative(*code, *value);
                             }
+                            emit_scroll(gesture, |code, value| self.mouse.relative(code, value));
                             for (code, pressed) in clicks {
                                 self.mouse.key(*code, *pressed);
                             }
@@ -1148,6 +1242,26 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+}
+
+/// Hand the wheel values to whichever sink is carrying this mode.
+///
+/// A closure rather than a sink reference, because the three sinks share this shape without
+/// sharing a trait — and inventing one for four lines would be the larger change.
+fn emit_scroll(out: ScrollOut, mut relative: impl FnMut(u16, i32)) {
+    use evdev::RelativeAxisCode as Rel;
+    if out.notch_y != 0 {
+        relative(Rel::REL_WHEEL.0, out.notch_y);
+    }
+    if out.hi_y != 0 {
+        relative(Rel::REL_WHEEL_HI_RES.0, out.hi_y);
+    }
+    if out.notch_x != 0 {
+        relative(Rel::REL_HWHEEL.0, out.notch_x);
+    }
+    if out.hi_x != 0 {
+        relative(Rel::REL_HWHEEL_HI_RES.0, out.hi_x);
     }
 }
 

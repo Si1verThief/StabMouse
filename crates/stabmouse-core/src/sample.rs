@@ -36,6 +36,23 @@ pub struct Sample {
     /// True on the sample where the press ended.
     pub stroke_end: bool,
 
+    /// Whether the user is holding the scroll gesture's button.
+    ///
+    /// Arrives on the sample for the same reason `constrain` does: a stage that asked a
+    /// device would make replay diverge from live.
+    pub scrolling: bool,
+
+    /// Scroll the pipeline decided to produce, in wheel notches, positive up and right.
+    ///
+    /// An **output** of the `scroll` stage rather than an input. The core cannot emit events
+    /// — it is pure — so a gesture that means "scroll" says so here and the daemon turns it
+    /// into wheel events on whichever sink is carrying the mode.
+    ///
+    /// Fractional on purpose: a hi-res wheel resolves 1/120th of a notch, and rounding to
+    /// whole notches is what makes drag-scrolling feel like a ratchet instead of a surface.
+    pub scroll_x: f64,
+    pub scroll_y: f64,
+
     /// Whether the user is holding the constrain modifier.
     ///
     /// Arrives on the sample rather than being read from a device, for the same reason time
@@ -72,6 +89,9 @@ impl Sample {
             down,
             stroke_start: false,
             stroke_end: false,
+            scrolling: false,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
             constrain: false,
             discontinuity: false,
             pressure: None,

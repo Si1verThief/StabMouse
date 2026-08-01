@@ -295,7 +295,7 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 | `drag.invert` | bool | Natural versus traditional |
 | `joystick.deadzone_mm` | f64 | Displacement before scrolling starts |
 | `joystick.gain` | f64 | Scroll rate per mm of displacement |
-| `hi_res` | bool | Emit `REL_WHEEL_HI_RES` — default true |
+| `hi_res` | bool | Emit `REL_WHEEL_HI_RES` — always on, see below |
 
 - **`drag`** — touchscreen-style swipe. While held, hand motion scrolls directly and
   the cursor is frozen.
@@ -315,7 +315,27 @@ continuous by nature.
 While active it **consumes motion** — downstream position stages see nothing and
 drawing is suspended for the duration.
 
-Per D12: specified now so the pipeline accommodates it, built once the core is solid.
+**Built.** Parameter names are flattened to match the rest of the schema —
+`drag_mm_per_unit`, `drag_invert`, `joystick_deadzone_mm`, `joystick_gain` — and `button`
+takes a key or button name exactly as `snap.modifier` does (D24), so a spare side button
+or the middle button both work.
+
+**Both resolutions are always emitted**, so `hi_res` needs no switch: an application that
+understands `REL_WHEEL_HI_RES` gets the smooth version and one that does not still
+scrolls. Emitting only the fine axis loses scrolling entirely in anything not updated for
+it, which is not a trade worth offering.
+
+**The fractional remainder is carried per axis and per resolution.** A notch is 120 hi-res
+units, and at 1000Hz a single sample of a slow drag is a tiny fraction of either — so
+truncating each sample independently would scroll nothing at all. This is the accumulation
+hazard from modules.md, and the two resolutions need separate accumulators because a
+notch's worth of hi-res motion is reported long before a whole notch is owed.
+
+**`joystick` reports itself unsettled while coasting**, which is what keeps the daemon's
+zero-motion ticks coming — a velocity that persists while the hand is still has no input
+of its own to be driven by. `drag` is settled between samples, since it produces nothing
+without movement, and claiming otherwise would hold the tick loop open for a gesture with
+nothing to add.
 
 ## `pressure` — pinned last
 
