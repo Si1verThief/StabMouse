@@ -215,6 +215,7 @@ fn build_scroll(p: &mut Params) -> Scroll {
     scroll.full_release_stops_momentum =
         p.bool("full_release_stops_momentum", scroll.full_release_stops_momentum);
     scroll.wheel_gain = p.f64("wheel_gain", scroll.wheel_gain);
+    scroll.always_active = p.bool("always_active", scroll.always_active);
     // Resolved by the daemon — deciding what reaches a sink is not a filter's business.
     let _ = p.str("mouse_passthrough", "");
     scroll.momentum = p.bool("momentum", scroll.momentum);

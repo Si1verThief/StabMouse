@@ -59,12 +59,6 @@ pub struct Sample {
     pub wheel_v: f64,
     pub wheel_h: f64,
 
-    /// Whether the scroll gesture has a binding at all.
-    ///
-    /// Distinguishes "bound and not held" from "not bound", which a mode that acts whenever
-    /// nothing is asked of it needs in order to tell those apart.
-    pub scroll_bound: bool,
-
     /// Scroll the pipeline decided to produce, in wheel notches, positive up and right.
     ///
     /// An **output** of the `scroll` stage rather than an input. The core cannot emit events
@@ -116,7 +110,6 @@ impl Sample {
             scroll_partial: false,
             wheel_v: 0.0,
             wheel_h: 0.0,
-            scroll_bound: false,
             scroll_x: 0.0,
             scroll_y: 0.0,
             constrain: false,

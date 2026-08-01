@@ -290,9 +290,10 @@ Diverts pointer motion into scroll events while a bound button is active. Opt-in
 |---|---|---|
 | `mode` | enum | `drag` (default) · `wheel` · `joystick` |
 | `freeze_cursor` | bool | Swipe (true) versus hand tool (false). Every mode honours it |
-| `full_release_stops_momentum` | bool | Chord bindings only — see below |
+| `full_release_stops_momentum` | bool | Chords, and any binding in `wheel` — see below |
 | `mouse_passthrough` | enum | `always` · `unless_active` (default) · `reserved` |
 | `wheel_gain` | f64 | `wheel` mode: output notches per wheel notch |
+| `always_active` | bool | `wheel` mode: act with nothing held. Off by default |
 | `button` | binding | What activates it |
 | `latch` | bool | `joystick`: click-to-latch versus hold |
 | `speed` | f64 | Notches per millimetre of hand travel. Higher is faster |
@@ -319,11 +320,18 @@ does not emit them, and a setting implying otherwise would claim control over a 
 project refuses to grab. The pen button is never taken either, since a preset that bound it
 would silently lose the ability to draw.
 
+**In `wheel` mode it governs the wheel as well as the button**, that being the input the
+gesture actually consumes — otherwise `reserved` would describe only half of what is taken.
+Under `always` the wheel is never withheld, so the stage's output lands *on top of* it and
+the page moves twice; that is what the setting says, and `unless_active` is the default for
+exactly this reason. **No other mode is affected**: a `drag` preset set to `reserved`
+reserves the button it bound, never a wheel it has no interest in.
+
 - **`wheel`** — your own wheel, routed through the stage so it picks up the speed and
-  momentum set here. With a binding, only while it is held: `alt+wheel` coasts and a plain
-  wheel does not. With none, always — a wheel that always has momentum is a reasonable
-  thing to want, and a mode chosen deliberately should not need a second thing chosen
-  before it acts.
+  momentum set here. The binding is a **modifier**, not a grip: it is held while the wheel
+  turns, so `alt+wheel` coasts and a plain wheel does not. With nothing bound the mode is
+  **inert** until `always_active` is set — selecting a mode is not the same as asking it to
+  rewrite an input the user already had, and the wheel is the one input that already worked.
 
 ### The wheel goes through the pipeline, and comes out again untouched
 
@@ -332,6 +340,13 @@ and the daemon emits exactly what came back — including horizontal wheel, hi-r
 unusual axis a device happens to carry. Routing the wheel through the filters must never
 become a new way to lose scrolling, so a stage that takes it must *clear* what it took, and
 anything left is passed on verbatim.
+
+**One notch is one notch: the hi-res axis wins where both are present.** A hi-res mouse
+sends `REL_WHEEL` *and* `REL_WHEEL_HI_RES` for the same detent, in the same report — the
+coarse axis summarising the fine one for readers that do not understand it, not a second
+movement. Summing them made every notch arrive as two, which no amount of `wheel_gain` could
+correct because it was doubling the input rather than the output. Devices with no hi-res
+wheel send only the coarse axis, so the fallback is what keeps them working at all.
 
 - **`drag`** — touchscreen-style swipe. While held, hand motion scrolls directly and
   the cursor is frozen, as a finger on glass has no cursor to move. **This is the only
@@ -373,14 +388,23 @@ between emissions is carried into the next.
 
 **`full_release_stops_momentum`** gives a flick a brake without a second binding. With a
 chord — `KEY_LEFTALT+BTN_MIDDLE` — holding both steers, releasing one leaves the page
-coasting, and releasing the rest stops it dead. Offered only for chords, because with a
-single button there is no halfway state for it to read.
+coasting, and releasing the rest stops it dead.
+
+Offered for chords, because with a single button there is no halfway state for it to read —
+**and for any binding in `wheel` mode**, where the binding is a modifier held throughout, so
+releasing it is the gesture ending rather than a hand loosening its grip. The editor shows
+it as *Releasing the modifier stops momentum* there: the same setting, but "full release" is
+not what the user would be doing.
 
 **Momentum** (`momentum`, `momentum_decay_ms`) carries a released flick onward, decaying
 exponentially, so a long page feels like a surface with weight rather than a crank. Off by
-default. Any new press cancels a glide, because a hand back on the mouse wants control
-rather than to fight the page's leftover speed. Joystick has no release to carry from and
-ignores it.
+default. Joystick has no release to carry from and ignores it.
+
+A new press cancels a glide, because a hand back on the mouse wants control rather than to
+fight the page's leftover speed — **but `wheel` mode is exempt**, since its binding is a
+modifier that is *already* held when the wheel turns. Applying the rule there cancelled the
+glide on the very sample that seeded it, which left momentum working only for users who had
+bound nothing at all.
 
 **Why this is in scope.** Middle-click autoscroll is standard on Windows and in
 browsers, and inconsistent or missing across Linux desktops — a common complaint from

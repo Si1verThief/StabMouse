@@ -219,6 +219,44 @@ impl ScrollOut {
 /// Hi-res wheel units per notch, fixed by the kernel's `REL_WHEEL_HI_RES` contract.
 const HI_RES_PER_NOTCH: f64 = 120.0;
 
+/// Whether a relative axis is one of the four the wheel speaks through.
+fn is_wheel_axis(code: u16) -> bool {
+    use evdev::RelativeAxisCode as Rel;
+    code == Rel::REL_WHEEL.0
+        || code == Rel::REL_HWHEEL.0
+        || code == Rel::REL_WHEEL_HI_RES.0
+        || code == Rel::REL_HWHEEL_HI_RES.0
+}
+
+/// How far the wheel turned in one report, in notches — vertical then horizontal.
+///
+/// **The hi-res axis wins wherever both are present.** A mouse with a hi-res wheel emits
+/// `REL_WHEEL` *and* `REL_WHEEL_HI_RES` for the same physical notch, in the same report: the
+/// coarse axis is a summary of the fine one for readers that do not understand it, not a
+/// second movement. Adding them made one notch arrive as two, which is what "wheel mode
+/// scrolls twice as far as it should" was. Devices without a hi-res wheel send only the coarse
+/// axis, so falling back to it is what keeps them working at all.
+fn wheel_notches(axes: &[(u16, i32)]) -> (f64, f64) {
+    use evdev::RelativeAxisCode as Rel;
+    let (mut v_fine, mut h_fine, mut v_coarse, mut h_coarse) = (0.0, 0.0, 0.0, 0.0);
+    for (code, value) in axes {
+        let v = f64::from(*value);
+        if *code == Rel::REL_WHEEL_HI_RES.0 {
+            v_fine += v / HI_RES_PER_NOTCH;
+        } else if *code == Rel::REL_HWHEEL_HI_RES.0 {
+            h_fine += v / HI_RES_PER_NOTCH;
+        } else if *code == Rel::REL_WHEEL.0 {
+            v_coarse += v;
+        } else if *code == Rel::REL_HWHEEL.0 {
+            h_coarse += v;
+        }
+    }
+    (
+        if v_fine != 0.0 { v_fine } else { v_coarse },
+        if h_fine != 0.0 { h_fine } else { h_coarse },
+    )
+}
+
 /// Shortest interval between scroll events a gesture will emit.
 ///
 /// **A gesture can produce a scroll on every sample, and a mouse never does.** A real wheel
@@ -1292,10 +1330,6 @@ impl Runtime {
         let constrain = self.constrain_held();
         let scrolling = self.scroll_held();
         let scroll_partial = self.scroll_partly_held();
-        let scroll_bound = self
-            .modes
-            .current()
-            .is_some_and(|m| !m.scroll_button.is_empty());
 
         let Some(mode) = self.modes.current_mut() else {
             return Ok(());
@@ -1316,29 +1350,34 @@ impl Runtime {
         // point of routing it through is momentum on a wheel you already own, not a new way
         // to lose scrolling.
         use evdev::RelativeAxisCode as Rel;
-        for (code, value) in &report.other_relative {
-            let v = f64::from(*value);
-            if *code == Rel::REL_WHEEL.0 {
-                sample.wheel_v += v;
-            } else if *code == Rel::REL_HWHEEL.0 {
-                sample.wheel_h += v;
-            } else if *code == Rel::REL_WHEEL_HI_RES.0 {
-                sample.wheel_v += v / HI_RES_PER_NOTCH;
-            } else if *code == Rel::REL_HWHEEL_HI_RES.0 {
-                sample.wheel_h += v / HI_RES_PER_NOTCH;
-            }
-        }
-        sample.scroll_bound = scroll_bound;
-        let wheel_in = (sample.wheel_v, sample.wheel_h);
+        let wheel_in = wheel_notches(&report.other_relative);
+        sample.wheel_v = wheel_in.0;
+        sample.wheel_h = wheel_in.1;
+        let scroll_uses_wheel = mode.scroll_uses_wheel;
+        let passthrough = mode.passthrough;
         mode.pipeline.process(&mut sample);
+
+        // Axes that are not the wheel — pan, or anything unusual a device carries — were never
+        // candidates for any of this and survive every rule below.
+        let mut passthrough_wheel: Vec<(u16, i32)> = report
+            .other_relative
+            .iter()
+            .copied()
+            .filter(|(code, _)| !is_wheel_axis(*code))
+            .collect();
 
         // The `scroll` stage turns held motion into scroll and consumes the motion, so a
         // gesture reaches the sinks as wheel events rather than as cursor movement.
         // Anything a stage did not take leaves as it arrived. Compared against what went in,
         // so a stage that only *changed* the value still cannot make it vanish unnoticed.
-        let wheel_kept = sample.wheel_v == wheel_in.0 && sample.wheel_h == wheel_in.1;
-        let passthrough_wheel: Vec<(u16, i32)> = if wheel_kept {
-            report.other_relative.clone()
+        let untouched: Vec<(u16, i32)> = report
+            .other_relative
+            .iter()
+            .copied()
+            .filter(|(code, _)| is_wheel_axis(*code))
+            .collect();
+        let mut owed = if (sample.wheel_v, sample.wheel_h) == wheel_in {
+            untouched.clone()
         } else {
             // Partly consumed: re-emit only what is left, at the resolution it came in.
             let mut out = Vec::new();
@@ -1348,22 +1387,26 @@ impl Runtime {
             if sample.wheel_h != 0.0 {
                 out.push((Rel::REL_HWHEEL_HI_RES.0, (sample.wheel_h * HI_RES_PER_NOTCH) as i32));
             }
-            // Axes that are not the wheel — pan, or anything unusual a device carries — were
-            // never candidates and must survive regardless.
-            for (code, value) in &report.other_relative {
-                if ![
-                    Rel::REL_WHEEL.0,
-                    Rel::REL_HWHEEL.0,
-                    Rel::REL_WHEEL_HI_RES.0,
-                    Rel::REL_HWHEEL_HI_RES.0,
-                ]
-                .contains(code)
-                {
-                    out.push((*code, *value));
-                }
-            }
             out
         };
+
+        // In `wheel` mode the wheel is the input the gesture consumes, so the same three-state
+        // setting that decides what a bound *button* still does for the application decides
+        // this too — which is what makes `reserved` actually reserve rather than describe only
+        // half of what the gesture takes.
+        //
+        // **Every other mode is left alone.** A drag preset set to `reserved` reserves the
+        // button it bound, never a wheel it has no interest in; treating the setting as global
+        // would silently kill scrolling for a preset that never mentioned the wheel.
+        if scroll_uses_wheel {
+            use stabmouse_config::Passthrough;
+            match passthrough {
+                Passthrough::Reserved => owed.clear(),
+                Passthrough::Always => owed = untouched,
+                Passthrough::UnlessActive => {}
+            }
+        }
+        passthrough_wheel.extend(owed);
 
         let gesture = self.take_scroll(&sample);
 
@@ -1647,4 +1690,54 @@ fn newest_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
         walk(dir, &mut best);
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use evdev::RelativeAxisCode as Rel;
+
+    #[test]
+    fn one_notch_from_a_hi_res_wheel_is_one_notch() {
+        // The report a hi-res mouse actually sends for a single detent: both axes, describing
+        // the same movement twice. Summing them made everything downstream twice as fast — the
+        // "wheel mode scrolls double" report, and not something any amount of gain could fix.
+        let report = [(Rel::REL_WHEEL.0, 1), (Rel::REL_WHEEL_HI_RES.0, 120)];
+        assert_eq!(wheel_notches(&report), (1.0, 0.0));
+    }
+
+    #[test]
+    fn a_wheel_without_hi_res_still_scrolls() {
+        // Falling back rather than requiring the fine axis: plenty of mice have never sent it.
+        assert_eq!(wheel_notches(&[(Rel::REL_WHEEL.0, -2)]), (-2.0, 0.0));
+        assert_eq!(wheel_notches(&[(Rel::REL_HWHEEL.0, 1)]), (0.0, 1.0));
+    }
+
+    #[test]
+    fn a_partial_notch_arrives_as_a_fraction() {
+        // What the fine axis is for: a free-spinning wheel resolves 1/120th of a detent, and
+        // rounding that to nothing is how a smooth wheel becomes a ratchet.
+        assert_eq!(wheel_notches(&[(Rel::REL_WHEEL_HI_RES.0, 30)]), (0.25, 0.0));
+    }
+
+    #[test]
+    fn the_axes_are_read_independently() {
+        // A tilt-wheel mouse can send both at once, and a vertical detent must not decide
+        // whether the horizontal one is read at its fine or coarse resolution.
+        let report = [
+            (Rel::REL_WHEEL.0, 1),
+            (Rel::REL_WHEEL_HI_RES.0, 120),
+            (Rel::REL_HWHEEL.0, -1),
+        ];
+        assert_eq!(wheel_notches(&report), (1.0, -1.0));
+    }
+
+    #[test]
+    fn axes_that_are_not_the_wheel_are_left_out_of_all_of_this() {
+        // REL_DIAL, pan, whatever else a device carries: never candidates for the gesture, and
+        // they must survive every passthrough rule untouched.
+        assert!(!is_wheel_axis(Rel::REL_DIAL.0));
+        assert!(!is_wheel_axis(Rel::REL_X.0));
+        assert_eq!(wheel_notches(&[(Rel::REL_DIAL.0, 5)]), (0.0, 0.0));
+    }
 }

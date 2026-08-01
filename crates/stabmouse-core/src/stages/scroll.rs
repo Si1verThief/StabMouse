@@ -15,9 +15,10 @@ pub enum Mode {
     Drag,
     /// Your own wheel, routed through this stage so it picks up speed and momentum.
     ///
-    /// With a binding, only while it is held — `alt+wheel` coasts and a plain wheel does
-    /// not. With none, always: a wheel that always has momentum is a reasonable thing to
-    /// want, and a mode chosen deliberately should not need a second thing chosen to act.
+    /// The binding here is a **modifier**, not a grip: `alt+wheel` coasts while a plain wheel
+    /// does not. Acting with nothing bound is `always_active`, off by default — a stage that
+    /// started rewriting the wheel the moment the mode was picked would be changing the one
+    /// input the user had not asked it to touch.
     Wheel,
     /// Middle-click autoscroll: displacement from where the button went down sets a scroll
     /// *velocity*, so a small sustained offset scrolls without more hand travel.
@@ -84,11 +85,21 @@ pub struct Scroll {
     pub momentum_decay_s: f64,
     /// Notches of output per notch of wheel, in `wheel` mode.
     pub wheel_gain: f64,
-    /// With a chord binding, letting go of *everything* ends the glide.
+    /// Act with nothing held, in `wheel` mode.
     ///
-    /// Releasing one part of the chord leaves the page coasting; releasing the rest stops it
-    /// dead. That gives a flick a brake without needing a second binding for it, and it only
-    /// means anything for a chord — with one button there is no halfway.
+    /// Without it an unbound wheel mode is **inert**, which is the safe default: the wheel is
+    /// an input the user already had, and a mode that started rewriting it the moment it was
+    /// selected would be taking something without being asked. Turning this on is how you say
+    /// you want every scroll to go through the stage.
+    pub always_active: bool,
+    /// Letting go of *everything* ends the glide.
+    ///
+    /// Releasing one part of a chord leaves the page coasting; releasing the rest stops it
+    /// dead. That gives a flick a brake without needing a second binding for it.
+    ///
+    /// It means something for any binding in `wheel` mode, where the binding is a modifier and
+    /// releasing it is the natural "stop" — and only for a chord in the other modes, where a
+    /// single button has no halfway state to coast in.
     pub full_release_stops_momentum: bool,
 
     /// Displacement from the press origin, millimetres.
@@ -139,6 +150,7 @@ impl Scroll {
             // than as one that keeps going after the hand has moved on.
             momentum_decay_s: 0.35,
             wheel_gain: 1.0,
+            always_active: false,
             full_release_stops_momentum: false,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -234,36 +246,46 @@ impl Stage for Scroll {
         let sign = if self.invert { -1.0 } else { 1.0 };
         let active = self.engaged(s.scrolling);
 
-        // The wheel, in the mode that asks for it. Taken *and cleared*, so the daemon does
-        // not also pass the original through and double it; left alone in every other mode,
-        // so a wheel this stage is not interested in behaves exactly as it always did.
-        let takes_wheel = self.mode == Mode::Wheel && (!s.scroll_bound || active);
-        if takes_wheel && (s.wheel_v != 0.0 || s.wheel_h != 0.0) {
-            let gain = if self.wheel_gain.is_finite() && self.wheel_gain > 0.0 {
-                self.wheel_gain
-            } else {
-                1.0
-            };
-            let (v, h) = (s.wheel_v * gain, s.wheel_h * gain);
-            s.wheel_v = 0.0;
-            s.wheel_h = 0.0;
-            s.scroll_y += v;
-            s.scroll_x += h;
-            // A wheel notch is an impulse rather than a rate, so the glide is seeded from the
-            // notch itself: one flick of the wheel, one length of coast.
-            if self.momentum && dt > 0.0 {
-                self.glide_y += v / dt.max(0.008);
-                self.glide_x += h / dt.max(0.008);
-                self.coasting = true;
+        // `wheel` has its own shape and takes it here, rather than being threaded through a
+        // body written for a gesture that diverts hand movement. There is no press origin, no
+        // motion to eat, and — the part that matters — **a held binding is a modifier, not a
+        // hand returning to the mouse**. The shared path cancels the glide the moment the
+        // gesture engages, which is right for a grab and is what made momentum unreachable for
+        // anyone who bound this mode at all.
+        if self.mode == Mode::Wheel {
+            let acting = self.always_active || active;
+            if acting && (s.wheel_v != 0.0 || s.wheel_h != 0.0) {
+                // Taken *and cleared*, so nothing downstream passes the original through as
+                // well and doubles it. Every other mode leaves both axes alone, which is what
+                // makes routing the wheel through the pipeline safe at all.
+                let gain = if self.wheel_gain.is_finite() && self.wheel_gain > 0.0 {
+                    self.wheel_gain
+                } else {
+                    1.0
+                };
+                let (v, h) = (s.wheel_v * gain, s.wheel_h * gain);
+                s.wheel_v = 0.0;
+                s.wheel_h = 0.0;
+                s.scroll_y += v;
+                s.scroll_x += h;
+                // A notch is an impulse rather than a rate, so the glide is seeded from the
+                // notch itself: one flick of the wheel, one length of coast.
+                if self.momentum && dt > 0.0 {
+                    self.glide_y += v / dt.max(0.008);
+                    self.glide_x += h / dt.max(0.008);
+                    self.coasting = true;
+                }
             }
-        }
-
-        if !active && self.mode == Mode::Wheel {
-            // A wheel mode with no binding is always listening, so it must reach the wheel
-            // handling above rather than returning here with the gesture "inactive".
+            // Letting go of the modifier is the brake, on the same binding rather than a
+            // second one to find. A chord still coasts while any part is held.
+            if !acting && self.full_release_stops_momentum && !s.scroll_partial {
+                self.glide_x = 0.0;
+                self.glide_y = 0.0;
+            }
             self.glide(s, dt);
             return;
         }
+
         if !active {
             // Letting go of the whole chord is a brake. Checked before the glide runs, so a
             // full release stops the page on the same sample rather than a frame later.
@@ -303,7 +325,8 @@ impl Stage for Scroll {
         let mut produced_y = 0.0;
 
         match self.mode {
-            // The wheel is the whole input; there is no hand movement to divert.
+            // Handled and returned above; the wheel is the whole input, so there is no hand
+            // movement here for it to divert.
             Mode::Wheel => {}
             Mode::Drag => {
                 let speed = if self.speed.is_finite() && self.speed > 0.0 {
@@ -634,13 +657,13 @@ mod tests {
         assert!(stage.glide_x == 0.0 && stage.glide_y == 0.0);
     }
 
-    fn wheel_sample(bound: bool, held: bool) -> Sample {
+    fn wheel_sample(held: bool) -> Sample {
         let mut s = Sample::new(0.0, 0.0, 1000, false);
         s.dt = 0.001;
         s.wheel_v = 3.0;
         s.wheel_h = -2.0;
-        s.scroll_bound = bound;
         s.scrolling = held;
+        s.scroll_partial = held;
         s
     }
 
@@ -650,7 +673,7 @@ mod tests {
         // stage not interested in it must leave it exactly as it arrived, on every axis.
         for mode in [Mode::Drag, Mode::Joystick] {
             let mut stage = Scroll::new(mode);
-            let mut s = wheel_sample(false, true);
+            let mut s = wheel_sample(true);
             stage.process(&mut s);
             assert_eq!((s.wheel_v, s.wheel_h), (3.0, -2.0), "{mode:?} took the wheel");
         }
@@ -659,7 +682,8 @@ mod tests {
     #[test]
     fn wheel_mode_takes_both_axes_and_clears_them() {
         let mut stage = Scroll::new(Mode::Wheel);
-        let mut s = wheel_sample(false, false);
+        stage.always_active = true;
+        let mut s = wheel_sample(false);
         stage.process(&mut s);
         assert_eq!((s.wheel_v, s.wheel_h), (0.0, 0.0), "taken means cleared, or it doubles");
         assert_eq!(s.scroll_y, 3.0);
@@ -667,16 +691,96 @@ mod tests {
     }
 
     #[test]
+    fn wheel_mode_is_inert_until_something_asks_for_it() {
+        // Selecting the mode is not consent to rewrite the one input the user already had.
+        // Off by default, it must pass the wheel through untouched — the same guarantee the
+        // other modes give — until either a binding is held or `always_active` says so.
+        let mut stage = Scroll::new(Mode::Wheel);
+        let mut idle = wheel_sample(false);
+        stage.process(&mut idle);
+        assert_eq!((idle.wheel_v, idle.wheel_h), (3.0, -2.0), "inert must pass through");
+        assert_eq!((idle.scroll_x, idle.scroll_y), (0.0, 0.0), "and produce nothing");
+    }
+
+    #[test]
     fn a_bound_wheel_mode_waits_for_its_binding() {
         // `alt+wheel` must leave a plain wheel alone, which is the whole reason to bind it.
         let mut stage = Scroll::new(Mode::Wheel);
-        let mut idle = wheel_sample(true, false);
+        let mut idle = wheel_sample(false);
         stage.process(&mut idle);
         assert_eq!((idle.wheel_v, idle.wheel_h), (3.0, -2.0), "unheld must pass through");
 
-        let mut held = wheel_sample(true, true);
+        let mut held = wheel_sample(true);
         stage.process(&mut held);
         assert_eq!((held.wheel_v, held.wheel_h), (0.0, 0.0), "held must take it");
+    }
+
+    #[test]
+    fn always_active_overrides_a_binding_rather_than_arguing_with_it() {
+        let mut stage = Scroll::new(Mode::Wheel);
+        stage.always_active = true;
+        let mut s = wheel_sample(false);
+        stage.process(&mut s);
+        assert_eq!((s.wheel_v, s.wheel_h), (0.0, 0.0), "always means always");
+    }
+
+    #[test]
+    fn a_held_modifier_does_not_kill_the_momentum_it_is_there_to_produce() {
+        // The bug this exists to prevent: the shared path cancels the glide whenever the
+        // gesture engages, on the reasoning that a hand back on the mouse wants control. In
+        // `wheel` mode the binding is a *modifier* and is held throughout, so that rule made
+        // momentum reachable only by users who had bound nothing at all.
+        let mut stage = Scroll::new(Mode::Wheel);
+        stage.momentum = true;
+
+        for i in 0..3 {
+            let mut s = Sample::new(0.0, 0.0, (i + 1) * 1000, false);
+            s.dt = 0.008;
+            s.wheel_v = 1.0;
+            s.scrolling = true;
+            s.scroll_partial = true;
+            stage.process(&mut s);
+        }
+        // Modifier still down, wheel now still: the page must keep moving.
+        let mut coasted = 0.0;
+        for i in 0..20 {
+            let mut s = Sample::new(0.0, 0.0, (i + 100) * 1000, false);
+            s.dt = 0.008;
+            s.scrolling = true;
+            s.scroll_partial = true;
+            stage.process(&mut s);
+            coasted += s.scroll_y;
+        }
+        assert!(coasted > 0.0, "a flick under a held modifier must coast: {coasted}");
+    }
+
+    #[test]
+    fn releasing_the_modifier_can_brake_a_wheel_glide() {
+        // Single-button in the other modes has no halfway state, so the brake means nothing
+        // there. Here the binding is a modifier, so releasing it is exactly the "stop".
+        fn run(brake: bool) -> f64 {
+            let mut stage = Scroll::new(Mode::Wheel);
+            stage.momentum = true;
+            stage.full_release_stops_momentum = brake;
+            for i in 0..3 {
+                let mut s = Sample::new(0.0, 0.0, (i + 1) * 1000, false);
+                s.dt = 0.008;
+                s.wheel_v = 1.0;
+                s.scrolling = true;
+                s.scroll_partial = true;
+                stage.process(&mut s);
+            }
+            let mut coasted = 0.0;
+            for i in 0..20 {
+                let mut s = Sample::new(0.0, 0.0, (i + 100) * 1000, false);
+                s.dt = 0.008;
+                stage.process(&mut s);
+                coasted += s.scroll_y;
+            }
+            coasted
+        }
+        assert_eq!(run(true), 0.0, "letting go must stop it dead");
+        assert!(run(false) > 0.0, "and with the brake off it coasts as before");
     }
 
     #[test]

@@ -71,6 +71,20 @@ pub struct ParamSpec {
     /// there is nothing between held and released, so offering the setting would be offering
     /// one that cannot do what it says.
     pub needs_chord: Option<&'static str>,
+    /// `(param, value, label)` — when `param` holds `value`, this is relevant even where the
+    /// rules above would fold it away, and it goes by `label` there.
+    ///
+    /// Visibility and naming travel together because the case that needs one needs the other:
+    /// a setting reaches past its usual gate precisely when the surrounding mode changes what
+    /// it *means*, and leaving the old name on it would describe something the user is not
+    /// looking at. The momentum brake is the case — gated on a chord everywhere, because a
+    /// single button has no halfway state to coast in, but a `wheel` binding is a modifier, so
+    /// releasing it is the whole gesture ending and "full release" is not what the user did.
+    ///
+    /// It relaxes `needs_chord` to "bound at all" rather than dropping it: a brake still needs
+    /// something to release. `depends_on` and `hidden_when` it overrides outright, that being
+    /// the point.
+    pub also_when: Option<(&'static str, &'static str, &'static str)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +118,7 @@ const fn f(
         depends_on: None,
         hidden_when: None,
         needs_chord: None,
+        also_when: None,
     }
 }
 
@@ -121,6 +136,16 @@ const fn when_chord(spec: ParamSpec, binding: &'static str) -> ParamSpec {
     ParamSpec { needs_chord: Some(binding), ..spec }
 }
 
+/// Relevant past its usual gate when `param` holds `value`, and named `label` there.
+const fn also_when(
+    spec: ParamSpec,
+    param: &'static str,
+    value: &'static str,
+    label: &'static str,
+) -> ParamSpec {
+    ParamSpec { also_when: Some((param, value, label)), ..spec }
+}
+
 const fn b(key: &'static str, label: &'static str, default: bool, help: &'static str) -> ParamSpec {
     ParamSpec {
         key,
@@ -131,6 +156,7 @@ const fn b(key: &'static str, label: &'static str, default: bool, help: &'static
         depends_on: None,
         hidden_when: None,
         needs_chord: None,
+        also_when: None,
     }
 }
 
@@ -150,6 +176,7 @@ const fn c(
         depends_on: None,
         hidden_when: None,
         needs_chord: None,
+        also_when: None,
     }
 }
 
@@ -163,6 +190,7 @@ const fn bind(key: &'static str, label: &'static str, help: &'static str) -> Par
         depends_on: None,
         hidden_when: None,
         needs_chord: None,
+        also_when: None,
     }
 }
 
@@ -435,23 +463,49 @@ pub const STAGES: &[StageSpec] = &[
                  from how far you hold away from where you pressed, and keeps scrolling while \
                  you hold still.",
             ),
-            bind(
-                "button",
-                "Button",
-                "What engages the gesture. BTN_MIDDLE is the familiar one — and in wheel \
-                 mode, leaving it unbound means the wheel is always routed through the stage \
-                 rather than only while something is held.",
+            also_when(
+                bind(
+                    "button",
+                    "Button",
+                    "What engages the gesture. BTN_MIDDLE is the familiar one. In wheel mode \
+                     it is a modifier rather than a grip — it is held while you turn the \
+                     wheel, so alt+wheel picks up these settings and a plain wheel does not.",
+                ),
+                "mode",
+                "wheel",
+                "Modifier",
             ),
-            c(
-                "mouse_passthrough",
-                "Bound mouse button still",
-                "unless_active",
-                &["always", "unless_active", "reserved"],
-                "What a bound *mouse* button still does for the application — keyboard keys \
-                 are never taken, since this daemon does not emit them. `unless_active` keeps \
-                 the button working except in the exact combination you bound, so with \
-                 alt+middle a plain middle click still pastes. `always` never takes it; \
-                 `reserved` always does.",
+            also_when(
+                c(
+                    "mouse_passthrough",
+                    "Bound mouse button still",
+                    "unless_active",
+                    &["always", "unless_active", "reserved"],
+                    "What a bound *mouse* button still does for the application — keyboard \
+                     keys are never taken, since this daemon does not emit them. \
+                     `unless_active` keeps the button working except in the exact combination \
+                     you bound, so with alt+middle a plain middle click still pastes. \
+                     `always` never takes it; `reserved` always does. In wheel mode this \
+                     governs the wheel too: `reserved` means the daemon owns your wheel \
+                     whether the gesture is running or not, and `always` means it is never \
+                     taken — so the stage's output lands on top of your wheel rather than \
+                     instead of it, and the page moves twice.",
+                ),
+                "mode",
+                "wheel",
+                "Bound button and wheel still",
+            ),
+            when(
+                b(
+                    "always_active",
+                    "Always active",
+                    false,
+                    "Route every scroll through this stage, with nothing held. Off, and with \
+                     nothing bound, the wheel is left alone entirely — selecting a mode is not \
+                     the same as asking it to rewrite an input you already had.",
+                ),
+                "mode",
+                "wheel",
             ),
             when(
                 f(
@@ -555,16 +609,22 @@ pub const STAGES: &[StageSpec] = &[
                 "mode",
                 "joystick",
             ),
-            when_chord(
-                b(
-                    "full_release_stops_momentum",
-                    "Full release stops momentum",
-                    false,
-                    "With a chord, letting go of one part leaves the page coasting and letting \
-                     go of the rest stops it dead — a brake on the same binding, with no \
-                     second one to find.",
+            also_when(
+                when_chord(
+                    b(
+                        "full_release_stops_momentum",
+                        "Full release stops momentum",
+                        false,
+                        "Letting go of the binding stops the page dead instead of leaving it \
+                         coasting — a brake on the binding you already have, with no second \
+                         one to find. With a chord, letting go of *one* part still coasts, so \
+                         only releasing everything stops it.",
+                    ),
+                    "button",
                 ),
-                "button",
+                "mode",
+                "wheel",
+                "Releasing the modifier stops momentum",
             ),
         ],
     },

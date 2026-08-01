@@ -255,31 +255,46 @@ fn apply_presets(app: &App, selected: usize) {
             if let Some(spec) = spec {
                 for p in spec.params {
                     seen.push(p.key);
+                    // A setting whose surrounding mode changes what it means reaches past its
+                    // usual gate, under the name it goes by there. Checked first, since the
+                    // whole point is that it outranks the rules below.
+                    let override_label = p
+                        .also_when
+                        .filter(|(on, wanted, _)| value_of(on).as_deref() == Some(*wanted))
+                        .map(|(_, _, label)| label);
+
                     // **A control that cannot do anything is not shown.** The joystick's
                     // settings under a drag gesture, the curve's under a flat sensitivity —
                     // leaving them visible implies they are doing something.
-                    if let Some((on, wanted)) = p.depends_on {
-                        if value_of(on).as_deref() != Some(wanted) {
-                            continue;
+                    if override_label.is_none() {
+                        if let Some((on, wanted)) = p.depends_on {
+                            if value_of(on).as_deref() != Some(wanted) {
+                                continue;
+                            }
                         }
-                    }
-                    if let Some((on, unwanted)) = p.hidden_when {
-                        if value_of(on).as_deref() == Some(unwanted) {
-                            continue;
+                        if let Some((on, unwanted)) = p.hidden_when {
+                            if value_of(on).as_deref() == Some(unwanted) {
+                                continue;
+                            }
                         }
                     }
                     // A halfway state needs more than one part to be halfway through, so a
-                    // setting that depends on one is offered only where it can act.
+                    // setting that depends on one is offered only where it can act. Where the
+                    // mode makes the binding a modifier there is no halfway to need — but
+                    // there is still something to release, so this softens rather than lifts.
                     if let Some(binding) = p.needs_chord {
-                        let chorded = stage
+                        let names = stage
                             .params
                             .iter()
                             .find(|q| q.key == binding)
                             .map(|q| presets::binding_names(&q.raw))
-                            .unwrap_or_default()
-                            .iter()
-                            .any(|entry| entry.contains('+'));
-                        if !chorded {
+                            .unwrap_or_default();
+                        let usable = if override_label.is_some() {
+                            !names.is_empty()
+                        } else {
+                            names.iter().any(|entry| entry.contains('+'))
+                        };
+                        if !usable {
                             continue;
                         }
                     }
@@ -288,7 +303,7 @@ fn apply_presets(app: &App, selected: usize) {
                         stage_index: index as i32,
                         stage_kind: stage.kind.clone().into(),
                         key: p.key.into(),
-                        label: p.label.into(),
+                        label: override_label.unwrap_or(p.label).into(),
                         unit: p.unit.into(),
                         help: p.help.into(),
                         ..Default::default()

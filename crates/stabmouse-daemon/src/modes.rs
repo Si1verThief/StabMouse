@@ -27,6 +27,14 @@ pub struct Mode {
     pub modifier: Vec<Vec<u16>>,
     /// What a bound mouse button still does for the application.
     pub passthrough: stabmouse_config::Passthrough,
+    /// Whether this mode's scroll gesture is the one that consumes the wheel.
+    ///
+    /// Read from the preset rather than asked of the pipeline for the same reason the bindings
+    /// are: `stabmouse-core` is pure and has no business answering questions about what the
+    /// daemon should withhold from an application. It decides whether `passthrough` governs
+    /// the wheel as well as the button — in every other mode the wheel is not the gesture's
+    /// input, and reserving it would take scrolling from a preset that never asked for it.
+    pub scroll_uses_wheel: bool,
 }
 
 pub struct Modes {
@@ -222,6 +230,7 @@ mod tests {
                 modifier: Vec::new(),
                 scroll_button: Vec::new(),
                 passthrough: Default::default(),
+            scroll_uses_wheel: false,
             })
             .collect();
         Modes::new(slots, 0)

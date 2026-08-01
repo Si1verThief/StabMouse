@@ -488,7 +488,10 @@ fn run(
     // The feature marker exists so a stale binary cannot masquerade as a new one — a release
     // build from the day before was once tested as if it were the current code, and every
     // conclusion drawn from that session was about software that was no longer there.
-    println!("  build: {} — unified position core (D23)", env!("CARGO_PKG_VERSION"));
+    println!(
+        "  build: {} — wheel mode: one notch is one notch, passthrough owns the wheel",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("  config: {}", dir.display());
     for line in modes.names() {
         println!("    {line}");
@@ -762,6 +765,7 @@ fn build_modes(
             modifier: Vec::new(),
             scroll_button: Vec::new(),
             passthrough: Default::default(),
+            scroll_uses_wheel: false,
         }];
     };
 
@@ -786,6 +790,7 @@ fn build_modes(
                 modifier: Vec::new(),
                 scroll_button: Vec::new(),
                     passthrough: Default::default(),
+                scroll_uses_wheel: false,
             });
             continue;
         };
@@ -812,6 +817,7 @@ fn build_modes(
             modifier: stage_bindings(preset, &m.preset, "snap", "modifier"),
             scroll_button: stage_bindings(preset, &m.preset, "scroll", "button"),
             passthrough: stage_passthrough(preset),
+            scroll_uses_wheel: scroll_uses_wheel(preset),
         });
     }
     out
@@ -878,6 +884,17 @@ fn stage_bindings(
 /// Read across every stage that binds one, taking the most permissive answer: a preset that
 /// says "always" anywhere means the user has asked for a button back, and quietly overruling
 /// that from another stage would be the surprise this setting exists to avoid.
+/// Whether this preset's scroll gesture is the one that consumes the wheel.
+///
+/// Read here rather than from the assembled pipeline because it decides what the *daemon*
+/// withholds from an application, which is not a filter's question — the same split that keeps
+/// binding resolution out of `stabmouse-core`.
+fn scroll_uses_wheel(preset: &stabmouse_config::Preset) -> bool {
+    preset.stages.iter().any(|s| {
+        s.kind == "scroll" && s.params.get("mode").and_then(|v| v.as_str()) == Some("wheel")
+    })
+}
+
 fn stage_passthrough(preset: &stabmouse_config::Preset) -> stabmouse_config::Passthrough {
     use stabmouse_config::Passthrough;
     let mut result = Passthrough::default();
