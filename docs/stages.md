@@ -158,34 +158,41 @@ visible wobble with all shape detail intact, 0.5mm is smooth with shape preserve
 1.0mm begins rounding corners, 2.0mm distorts, 4.0mm destroys the drawing.** For
 scale, a whole small drawing spans roughly 8mm of hand movement.
 
-The anchor **must recover the accumulated lag at stroke end**, otherwise every stroke
-stops short of where the hand actually stopped.
+### Button state must not touch the leash
 
-### Recovering the lag is animated, not instantaneous
+**Settled by use, 2026-07-30, after getting it wrong twice in opposite directions.**
 
-Found by the replay bench on 2026-07-30, now implemented.
+Two earlier versions moved the anchor at a stroke boundary, on the reasoning that ink
+should begin and end at the hand's *true* position:
 
-Snapping the anchor to the cursor in a single sample recovers the right *distance* but
-draws a **straight line** to get there. The bench made it obvious: output speed spiked
-to 4000–9000 mm/s in one sample at stroke end, worst with a large radius and low
-catch-up — precisely the settings that make the stabiliser worth using.
+1. **Snapping to the cursor on press.** Teleported the cursor forward by a full radius on
+   every click — measured at exactly 2.02mm for a 2mm radius, the largest single-sample
+   delta anywhere in a recording.
+2. **Converging to the cursor on release.** Pushed the stroke past its intended end, *and*
+   emptied the leash so the next movement had a dead zone one radius wide before the cursor
+   moved at all. Reported from use as having to "feed a bunch of inputs to be allowed to
+   continue moving".
 
-Instead, stroke end enters a **closing** state in which the effective radius collapses
-to zero, so the anchor converges over subsequent ticks. `snap_on_stroke_end` remains
-available, defaulting off, for consumers that cannot tick.
+Both were backwards for the same reason: **the anchor is what the user sees.** They aim
+with it, press when it is on target, and release when it is where the stroke should end.
+Moving it to catch up with the hand moves it away from what they were aiming at.
 
-**`settled()` means "nothing outstanding", not "anchor equals cursor".** A pulled string
-legitimately rests a full radius behind the cursor — that is what it *is* — so asking
-for coincidence would make it permanently false and any tick loop infinite. This is
-easy to mistake for an oversight and simplify into a hang.
+So the rule is simply: **a stabiliser is a motion filter, and clicking is orthogonal to
+motion.** Button state changes nothing.
 
-**This has an architectural consequence.** The pipeline is event-driven, and after the
-button is released there may be no further mouse events at all — so nothing would drive
-the convergence. The daemon therefore needs a **timer-driven settle phase**: continue
-generating samples with zero motion until filters converge or a timeout elapses.
+Consequences, all of them wanted:
 
-Noted in modules.md as a daemon requirement. It also affects `pressure`, whose release
-envelope has the same problem — it cannot ramp down if no samples arrive after release.
+- The stroke ends a leash-length short of the hand — which is exactly where the user was
+  looking when they released.
+- Output totals trail input by up to the radius, permanently. That is the filter working,
+  not motion lost; the replay bench checks the residual against the radius as a budget
+  rather than expecting zero.
+- `settled()` is always true for this stage. Nothing is ever held back for a later flush,
+  so no tick loop can hang waiting on it.
+- `snap_on_stroke_end` survives as an opt-in for a consumer drawing with a very large
+  radius, defaulting off.
+
+`pressure` still needs ticks for its release envelope, so the daemon's tick loop remains.
 
 ## `average` — weighted moving average
 
@@ -411,6 +418,89 @@ applications treat zero pressure as pen-up — so a single stroke breaks into tw
 The value is not clamped, because clamping tunables is against project preference
 and someone will have a reason. But the UI warns when it is set to 0, explaining
 the consequence.
+
+## Defaults
+
+Batch 8. Every value is tagged with what actually backs it, because "measured" and
+"guessed" should not look alike in a spec.
+
+- **measured** — derived from real recordings, numbers below
+- **proposed** — reasoned, awaiting a feel check
+- **unvalidated** — works, never tuned
+
+### Measured from recordings (2026-07-30)
+
+Corpus: 11 recordings, ~60k samples, one R.A.T. 8+ ADV at 1600 dpi.
+
+| Quantity | Value |
+|---|---|
+| Sample interval | p50 1ms · p90 3ms · p99 22ms · p99.9 130ms |
+| Drawing speed, all strokes | p10 9 · p50 18 · p90 65 · p99 148 mm/s |
+| Peak speed *within* a careful stroke | median 20 · p90 30 mm/s |
+| Peak speed *within* a fast gesture | median 73 · p90 124 mm/s |
+| Stroke duration | shortest ~93ms · taps p50 112ms · lines p50 153ms |
+| Sensor direction-reversal rate | 0.2–0.4% while drawing |
+| Whole small drawing | ~8mm of hand movement |
+
+**There are two speed regimes, not one.** Careful drawing and fast gesturing differ by
+about 4×, which is why `v_max_mm_s` cannot have a single global value — it belongs to
+the preset, not the program.
+
+| Param | Default | Evidence |
+|---|---|---|
+| `deadzone.threshold_mm` | `0` | **measured** — the sensor essentially never reverses spuriously, and a still mouse emits no reports at all. Keep the stage: it will matter at 20,000 dpi |
+| `pressure.speed.v_max_mm_s` | `50` (careful) / `150` (fast) | **measured** — 50 gives a 0.45 pressure arch with *zero* clipping on careful strokes. The earlier 400 only swung pressure 0.98→0.63, which is why every trace looked flat |
+| `pressure.speed.gamma` | `2.0` | **measured** — with `v_max = 50` gives ends 0.84, mid-stroke 0.37 |
+| Daemon tick interval | `2ms` | **measured** — 0.033 envelope steps against a 60ms attack; 4ms gave the visible 0.067 steps. Most gaps are already under 2ms so it rarely fires |
+| `smooth.min_cutoff_hz` | `5.0` general · `2.0` tremor | **measured** — see sweep below |
+| `smooth.beta` | `0.05` general · `0.2` tremor | **measured** — see sweep below |
+
+#### `smooth` sweep
+
+Stabiliser disabled so one-euro is isolated. *wobble* = output path length / input path
+length, so lower means more tremor removed. *lag* = mean distance between the true hand
+position and the output.
+
+| | wobble (tremor) | lag (tremor) | wobble (drawing) | lag (drawing) |
+|---|---|---|---|---|
+| `mc2, b0.2` | **0.56** | 0.18mm | 0.86 | 0.44mm |
+| `mc3, b0.05` | 0.59 | 0.15mm | 0.85 | 0.45mm |
+| **`mc5, b0.05`** | 0.65 | 0.11mm | 0.88 | 0.30mm |
+| `mc10, b0.05` | 0.75 | 0.07mm | 0.91 | 0.16mm |
+
+`mc5/b0.05` is the general default: gentle, 0.30mm lag on deliberate strokes. `mc2/b0.2`
+for tremor, where removing 44% of path wobble is worth 0.44mm of lag.
+
+**`beta` must be 0.05–0.2 in these units, not the ~0.007 that appears in one-euro
+literature.** Beta multiplies velocity, and velocity here is mm/s — so a published beta
+is meaningless without knowing the units of the signal it was tuned against. At 0.01 it
+did nothing measurable across the whole corpus.
+
+The same caution applies to borrowing from Lazy Nezumi or Krita: their stabiliser values
+are in **pixels**, which is not this project's unit and cannot be converted without
+knowing their assumed DPI and pointer gain.
+
+An earlier attempt to derive a cutoff from the tremor *spectrum* was inconclusive —
+power came out flat across 1–25Hz and the apparent 12Hz peak sat inside the noise. The
+sweep above measures the thing we care about directly instead of via a proxy.
+
+### Proposed, pending a feel check
+
+| Param | Default | Note |
+|---|---|---|
+| `stabilize.radius_mm` | `0.4` inking · `0.8` sketch · `1.5` steady | Bracketed by measurement: 0.2 keeps all detail, 0.5 is smooth with shape intact, 1.0 rounds corners |
+| `pressure.envelope.attack_ms` | `60` | **Currently invisible** — every real stroke is ≥93ms, so all of them reach full pressure. Whether a 112ms tap should be a solid dot or a light one is style, not correctness |
+| `pressure.min_pressure` | `0.05` | Higher never gets truly thin; lower risks apps reading pen-up |
+| `pressure.speed.source` | `cursor` | Both implemented; unresolved by reasoning |
+
+### Unvalidated
+
+| Param | Default | Note |
+|---|---|---|
+| `smooth.d_cutoff_hz` | `1.0` | Left at the conventional value; not swept |
+| `stabilize.catch_up` | `0.35` | Never tuned independently of radius |
+| `pressure.speed.velocity_smoothing_ms` | `40` | Removed the visible grit in the probe; not swept |
+| `pressure.speed.stall.*` | 0.04mm / 120ms / `hold` | Chosen to make the mechanism work, not optimised |
 
 ## Always on, never exposed
 

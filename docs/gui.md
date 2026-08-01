@@ -6,6 +6,33 @@ separate process — see D3, D4).
 Read alongside [ux-requirements.md](ux-requirements.md) for the screen sketches and
 walkthroughs this fills in.
 
+## Implementation status
+
+Built and verified against a live session 2026-07-31: **window shell and dashboard.**
+Profiles, Presets and Devices are present in the sidebar and visibly disabled — a
+navigation item that opens nothing is worse than one that admits it is not built.
+
+The window **opens whether or not a daemon is running**, and says so with the remedy.
+Refusing to start would be the wrong failure: "no daemon" is a normal state with an
+obvious fix, and this is the frontend for people who are not in a terminal to read an
+error in.
+
+### Correction: the accent colour is not on D-Bus
+
+This document specified `org.kde.plasmashell.accentColor`. **That property does not
+exist on Plasma 6** — checked against a live session; `/PlasmaShell` exposes a `color`
+method, but it is the desktop containment's colour, not the accent.
+
+What does exist, and is what the user actually sees when they select something, is
+`[Colors:Selection] BackgroundNormal` in `kdeglobals`. It is written by the
+colour-scheme machinery whether the accent came from a scheme or from the accent
+picker, so it stays correct either way. Verified reading `235,49,49` on the
+development machine and rendering with it.
+
+Dark or light is inferred from the **luminance of the window background**, not from a
+scheme name: names are arbitrary, and someone on a third-party dark scheme not called
+"Dark" should still get the dark theme.
+
 Slint's viability was verified before any of this was decided: buffer-in-Rust →
 `SharedPixelBuffer` → `Image` on a timer renders a responsive drawing canvas, and
 the toolkit observes ~450–900 motion events/sec rather than being refresh-limited,

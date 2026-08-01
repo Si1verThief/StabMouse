@@ -150,7 +150,9 @@ Virtual device creation and event emission.
   `SYN_REPORT` is an event storm that *measurably breaks application UI* — it
   caused doubled clicks in Krita's menus until fixed. This is a correctness
   requirement, not an optimisation. Verified 2026-07-30.
-- **Both sinks are created at daemon startup and never torn down** — see D13.
+- **Every sink is created at daemon startup and never torn down** — see D13.
+- The absolute pointer states the mapper's position outright, so fallback and tablet
+  output **cannot diverge** — see D22. It never declares `REL_X`/`REL_Y`.
 - Relative sink reproduces **every axis and button the source had**, including
   hi-res wheel.
 - Tablet sink declares evdev bits such that **libinput classifies it as a tablet

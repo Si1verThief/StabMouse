@@ -102,6 +102,9 @@ preset = "inking"
 ```
 
 - Slot numbers are implicit from file order.
+- `output` is one of `mouse` (the ordinary pointer, delivered absolutely from the
+  shared position — D23), `tablet` (a pen, dropping to `mouse` per window — D20), or
+  `relative` (raw deltas for pointer-lock and raw-input consumers, i.e. games).
 - **Auto-activate rules live here**, since they are a property of this profile.
 - The mode toggle binding has a global default in `config.toml`, overridable per
   profile.
