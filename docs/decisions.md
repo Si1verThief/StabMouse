@@ -902,12 +902,9 @@ cause of hover focus tracking going blind in tablet transport (see the focus mod
   is obsolete — there is nothing left to reposition.
 - Fallback wheel and buttons travel through the same sink, so they land **under the
   visible cursor**. The relative path could guarantee neither.
-- **The wheel works in tablet transport too**, though *not* by this route in the end —
-  it leaves by the tablet device itself, which carries its own wheel. Krita discards
-  mouse input while a pen is in proximity, so a wheel from a second device is filtered
-  out; from the tablet there is no second device to be suspicious of. See P9 and the
-  note under D21. Still hover-only: with the pen down the wheel belongs to
-  `pressure.manual`.
+- **The wheel works in tablet transport too**, by this route, but only because the pen
+  stops while it turns — see D25. Still hover-only: with the pen down the wheel belongs
+  to `pressure.manual`.
 - D18's mirrored tablet clicks become correct at last: the press goes through the
   absolute pointer placed on the pen's position first — the same pixel the cursor
   already occupies, so nothing visibly moves.
@@ -978,6 +975,57 @@ the wrong-window hazard of evaluating `windowAt` against a stale cursor. **What 
 does not:** pressure over non-pen windows (physics, not policy), and the hover-wheel
 cost over pen windows (D21) — still waiting on hover-on-pointer / pen-on-stroke,
 which this design is one step closer to.
+
+---
+
+## D25 — Scrolling stops the pen, because the platform offers no other way
+
+**Decision:** while the wheel is turning in tablet transport, the pen holds still. Hand
+movement during that window is **discarded, not banked**. On by default, with
+`freeze_position_while_scrolling = false` and `scroll_freeze_ms` per profile.
+
+**The constraint is mutually exclusive, and both halves were measured.**
+
+*Krita ignores mouse input while a pen is in proximity.* This is the standard defence
+against tablet drivers that synthesise mouse events from pen events, which would
+otherwise double every action, and the suppression is **time-based, resetting on each
+tablet event**. A moving pen therefore keeps the wheel suppressed forever. Reported from
+use as "scroll only works when not moving at all" — and the Krita-only nature of it is
+what identified the mechanism, since Blender's GHOST does not filter this way. An earlier
+compositor-side explanation had already been built and shipped and did nothing, which is
+the cost of diagnosing by inference rather than by measurement.
+
+*A tablet cannot carry the wheel itself.* The obvious escape — one device, no second
+device to be suspicious of, exactly as a real tablet carries a ring — was probed (P9) and
+fails at the libinput level. libinput classifies a device as a tablet tool **or** a
+pointer, never both, and scroll is a pointer capability. With wheel axes attached, KWin
+reports `pointer = false, tabletTool = true` on our tablet; the relative axes are routed
+into the tablet-tool interface as an airbrush finger wheel, a channel no toolkit surfaces
+to applications. The classification itself survives intact, which is worth keeping in the
+record, but the wheel goes nowhere useful.
+
+So a device that can scroll must not be a tablet, and a device that is a tablet cannot
+scroll. Nothing in the arrangement of virtual devices resolves that.
+
+**What is left is to make the tablet quiet.** Holding the pen still lets the proximity
+filter lapse, and the wheel — back on the absolute pointer, positioned at the pen —
+lands. The freeze outlasts the last notch by `scroll_freeze_ms` so a slow deliberate
+scroll does not stutter between notches.
+
+**Discarded, not banked**, deliberately. Banking the hand's movement would fling the
+cursor the moment the freeze lifted, which is the transport-change teleport D22 exists to
+prevent, arriving by another door. And moving the cursor was not what the hand was asking
+for while it was scrolling — which is the same reasoning, reached from the user's side.
+
+**Consequences:**
+
+- The pen is **not taken out of proximity** to achieve this. Proximity churn is what
+  applications handle worst (D13), and the freeze needs the tool present anyway.
+- Off is a legitimate setting for someone who never scrolls in a tablet-aware application
+  and would rather keep the pen live at all times.
+- Blender never needed this, and is unharmed by it: a pen that holds still while the
+  wheel turns is reasonable behaviour everywhere, which is why it is one global setting
+  rather than a per-application table nobody could maintain.
 
 ---
 

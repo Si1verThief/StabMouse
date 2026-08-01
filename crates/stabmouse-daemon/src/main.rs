@@ -602,6 +602,13 @@ fn run(
         tablet_clicks: store
             .startup_profile()
             .is_some_and(|p| p.tablet_emits_mouse_clicks),
+        freeze_while_scrolling: store
+            .startup_profile()
+            .map_or(true, |p| p.freeze_position_while_scrolling),
+        scroll_freeze: std::time::Duration::from_millis(
+            store.startup_profile().map_or(250, |p| p.scroll_freeze_ms),
+        ),
+        frozen_until: None,
         inert: false,
     };
 
@@ -632,6 +639,12 @@ fn run(
                             tablet_emits_mouse_clicks: fresh
                                 .startup_profile()
                                 .is_some_and(|p| p.tablet_emits_mouse_clicks),
+                            freeze_position_while_scrolling: fresh
+                                .startup_profile()
+                                .map_or(true, |p| p.freeze_position_while_scrolling),
+                            scroll_freeze_ms: fresh
+                                .startup_profile()
+                                .map_or(250, |p| p.scroll_freeze_ms),
                         })
                     }
                 }

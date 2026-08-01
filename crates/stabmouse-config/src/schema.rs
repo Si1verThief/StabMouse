@@ -91,6 +91,38 @@ pub struct Profile {
     /// wrong — see D18 for what would fix it.
     #[serde(default)]
     pub tablet_emits_mouse_clicks: bool,
+
+    /// In tablet mode, hold the pen still while the wheel is turning.
+    ///
+    /// **On by default, because without it scrolling does not work in Krita at all.** Krita
+    /// discards mouse input while a pen is in proximity — the standard defence against drivers
+    /// that synthesise mouse events from tablet events — and the suppression is time-based,
+    /// resetting on every tablet event. A moving pen therefore keeps the wheel suppressed
+    /// indefinitely, which is exactly what was reported: scrolling worked only when the hand
+    /// held still. Sending the wheel from the tablet itself instead is not possible; libinput
+    /// will not give a tablet the pointer capability that scroll requires (P9).
+    ///
+    /// So the pen stops instead. Hand movement during a scroll is discarded rather than
+    /// banked, which is what makes it feel like a scroll rather than a delayed jump — and
+    /// moving the cursor was not what the hand was asking for anyway.
+    ///
+    /// Off is a legitimate choice for someone who never scrolls in a tablet-aware application
+    /// and would rather keep the pen live.
+    #[serde(default = "yes")]
+    pub freeze_position_while_scrolling: bool,
+
+    /// How long the pen stays frozen after the last wheel event, in milliseconds.
+    ///
+    /// Long enough to bridge the gap between notches of a slow deliberate scroll, so the pen
+    /// does not stutter back to life between them, and long enough for the filter that made
+    /// this necessary to lapse. Short enough that the pen feels attached to the hand again as
+    /// soon as scrolling stops.
+    #[serde(default = "scroll_freeze_default")]
+    pub scroll_freeze_ms: u64,
+}
+
+fn scroll_freeze_default() -> u64 {
+    250
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

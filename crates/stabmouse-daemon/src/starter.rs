@@ -167,6 +167,14 @@ default_mode = 1
 # tracks those two positions separately. Left here only so the switch exists.
 # tablet_emits_mouse_clicks = true
 
+# Hold the pen still while the wheel is turning, so scrolling works in tablet mode. On by
+# default, because Krita ignores mouse input while a pen is in proximity and a moving pen keeps
+# that filter armed — without this, scrolling only works when your hand is perfectly still.
+# Movement during a scroll is discarded rather than delayed, so nothing lurches afterwards.
+#
+# freeze_position_while_scrolling = false
+# scroll_freeze_ms = 250
+
 # Destroys the virtual tablet on leaving tablet mode; it comes back in about 50ms.
 #
 # This was written for Krita, which keeps painting a stale canvas cursor after the pen leaves

@@ -76,6 +76,13 @@ pub struct Runtime {
     /// Tracked here rather than read from the report, because a button's state persists
     /// between reports while `report.keys` carries only transitions.
     pub buttons_held: Vec<u16>,
+    /// Hold the pen still while the wheel turns, so scrolling works in tablet-aware
+    /// applications. See the config field of the same name for why this is necessary.
+    pub freeze_while_scrolling: bool,
+    /// How long the freeze outlasts the last wheel event.
+    pub scroll_freeze: Duration,
+    /// When the current freeze ends, if one is running.
+    pub frozen_until: Option<Instant>,
     pub last_tablet_xy: (i32, i32),
     /// State the D-Bus service reads. Written here, never read by the loop itself.
     pub published: crate::service::Published,
@@ -116,6 +123,8 @@ pub struct Reloaded {
     pub modes: Modes,
     pub destroy_tablet_on_leave: bool,
     pub tablet_emits_mouse_clicks: bool,
+    pub freeze_position_while_scrolling: bool,
+    pub scroll_freeze_ms: u64,
 }
 
 /// Which signal a state change should announce.
@@ -393,6 +402,8 @@ impl Runtime {
                     self.tablets
                         .set_destroy_on_leave(fresh.destroy_tablet_on_leave);
                     self.tablet_clicks = fresh.tablet_emits_mouse_clicks;
+                    self.freeze_while_scrolling = fresh.freeze_position_while_scrolling;
+                    self.scroll_freeze = Duration::from_millis(fresh.scroll_freeze_ms);
                     let name = self
                         .modes
                         .current()
@@ -841,14 +852,35 @@ impl Runtime {
                 self.mouse.flush()?;
             }
             Output::Tablet => {
+                // **A scroll stops the pen.** Krita discards mouse input while a pen is in
+                // proximity, on a timer that every tablet event resets, so a moving pen
+                // suppresses the wheel indefinitely — scrolling worked only when the hand
+                // held still, which is how the mechanism was identified. Sending the wheel
+                // from the tablet instead is not possible: libinput will not give a tablet the
+                // pointer capability that scroll requires (P9).
+                //
+                // So the pen holds still for as long as the wheel is turning, and the hand's
+                // movement during that time is **discarded rather than banked**. Banking it
+                // would fling the cursor when the freeze lifted, and moving the cursor was not
+                // what the hand was asking for while it was scrolling.
+                if self.freeze_while_scrolling && !*stroke_active
+                    && !report.other_relative.is_empty()
+                {
+                    self.frozen_until = Some(Instant::now() + self.scroll_freeze);
+                }
+                let frozen = self
+                    .frozen_until
+                    .is_some_and(|until| Instant::now() < until);
+                if !frozen {
+                    self.frozen_until = None;
+                }
+
                 // Per-screen when the layout is known, which also performs the handover as the
                 // pen crosses a boundary. Otherwise one surface over the whole desktop.
-                let (x, y) = match self
-                    .tablets
-                    .advance(sample.dx, sample.dy, *stroke_active)
-                {
+                let (dx, dy) = if frozen { (0.0, 0.0) } else { (sample.dx, sample.dy) };
+                let (x, y) = match self.tablets.advance(dx, dy, *stroke_active) {
                     Some(p) => p,
-                    None => self.mapper.advance(sample.dx, sample.dy),
+                    None => self.mapper.advance(dx, dy),
                 };
                 if (x, y) != self.last_tablet_xy {
                     self.emitted_motion = true;
@@ -864,27 +896,11 @@ impl Runtime {
                 self.tablets.lift_inactive();
 
                 let tablet = self.tablets.active().ensure()?;
+                // Emitted even while frozen: the position is unchanged, so `pen` states only
+                // what actually differs and a held pen costs nothing. Skipping it entirely
+                // would take the tool out of proximity, which is the one thing this must not
+                // do — proximity churn is what applications handle worst (D13).
                 tablet.pen(x, y, sample.pressure.unwrap_or(0.0), *stroke_active);
-
-                // **The wheel goes out the tablet itself**, not a second device.
-                //
-                // Krita discards mouse input while a pen is in proximity — the standard
-                // defence against drivers that synthesise mouse events from tablet events —
-                // and a separate virtual mouse is indistinguishable from exactly that. The
-                // suppression is time-based, which is why scrolling worked only while the pen
-                // was still: a stationary pen emits nothing, so the window expired. Blender
-                // does not filter this way, which is why it was never affected.
-                //
-                // From the tablet there is no second device to be suspicious of. A real tablet
-                // carries a ring or dial the same way, and P9 verified the device keeps its
-                // tablet classification with the axes attached.
-                //
-                // Still hover-only: with the pen down the wheel belongs to `pressure.manual`.
-                if !*stroke_active {
-                    for (code, value) in &report.other_relative {
-                        tablet.wheel(*code, *value);
-                    }
-                }
 
                 for (code, pressed) in &report.keys {
                     // Right and middle also become barrel buttons, for applications that read
@@ -897,29 +913,50 @@ impl Runtime {
                 }
                 tablet.flush()?;
 
-                // A pen tip cannot press anything outside a tablet-aware application: KWin
-                // turns one into a click only behind a deprecated environment variable (D18).
-                // So buttons are mirrored onto the absolute pointer, placed on the pen's
-                // position first — the pixel the cursor already occupies, so nothing visibly
-                // moves and the press lands where the user is pointing.
+                // Neither the wheel nor a button reaches an application through the pen: KWin
+                // turns a tip into a click only behind a deprecated environment variable
+                // (D18), and a tablet cannot carry scroll at all (P9). Both leave by the
+                // absolute pointer, placed on the pen's position first — the pixel the cursor
+                // already occupies, so nothing visibly moves and both land where the user is
+                // pointing.
                 //
-                // Behind `tablet_emits_mouse_clicks` because an application reading both
-                // tablet and mouse buttons would see one press twice. The wheel needs no such
-                // gate and no longer comes through here at all — it leaves by the tablet.
-                if self.tablet_clicks && !report.keys.is_empty() {
+                // The wheel works from here *because* of the freeze above: with the pen held
+                // still, the proximity filter that was swallowing it lapses.
+                //
+                // Hover only. With the pen down the wheel is the input to `pressure.manual`
+                // (stages.md), which is specified as active during a stroke — reserving it now
+                // means building that term cannot make one notch do two things.
+                //
+                // Clicks stay behind `tablet_emits_mouse_clicks` because an application
+                // reading both tablet and mouse buttons would see one press twice. The wheel
+                // has no such hazard, the pen having no wheel to double with.
+                let wheel: &[(u16, i32)] = if *stroke_active {
+                    &[]
+                } else {
+                    &report.other_relative
+                };
+                let clicks: &[(u16, bool)] = if self.tablet_clicks { &report.keys } else { &[] };
+                if !wheel.is_empty() || !clicks.is_empty() {
                     let at = self.tablets.position_px();
                     match (self.pointer.as_mut(), at) {
                         (Some(pointer), Some((px, py))) => {
                             pointer.position(px, py);
-                            for (code, pressed) in &report.keys {
+                            for (code, value) in wheel {
+                                pointer.relative(*code, *value);
+                            }
+                            for (code, pressed) in clicks {
                                 pointer.key(*code, *pressed);
                             }
                             pointer.flush()?;
                         }
                         _ => {
-                            // No absolute pointer: the old wrong-position behaviour, since a
-                            // press somewhere still beats no press anywhere.
-                            for (code, pressed) in &report.keys {
+                            // No absolute pointer. The wheel still works — scrolling needs
+                            // focus, not position — while clicks keep the old wrong-position
+                            // behaviour, since a press somewhere beats no press anywhere.
+                            for (code, value) in wheel {
+                                self.mouse.relative(*code, *value);
+                            }
+                            for (code, pressed) in clicks {
                                 self.mouse.key(*code, *pressed);
                             }
                             self.mouse.flush()?;
