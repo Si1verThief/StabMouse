@@ -75,6 +75,9 @@ pub struct Runtime {
     pub last_transport: Option<Output>,
     /// User entries overriding the built-in tablet-support table, from config.
     pub tablet_overrides: Vec<(String, bool)>,
+    /// Opt-in `auto_activate` rules from the profile. Empty means no auto-switching, which is
+    /// the default and the safe one.
+    pub auto: crate::auto::AutoSwitch,
     /// In tablet mode, also emit ordinary mouse buttons alongside the pen.
     ///
     /// KWin only turns a pen tip into a click for clients that speak `tablet_v2`. Everything
@@ -306,6 +309,13 @@ impl Runtime {
                 }
             }
 
+            // Opt-in, and a no-op for a profile with no rules. Outside the stroke because a
+            // line crossing a window boundary is not a request to change mode, and while
+            // filtering because a panicked daemon should change nothing at all.
+            if !self.inert && !stroke_active {
+                self.auto_switch(&mut stats);
+            }
+
             // Entering a fallback must lift the pen, exactly as leaving tablet output does.
             // A tool left in proximity over an application that cannot see it keeps the
             // compositor believing a pen is present.
@@ -418,7 +428,45 @@ impl Runtime {
         self.publish(Change::Enabled);
     }
 
+    /// A switch the user asked for. Only ever called from command handling, which is what
+    /// makes it the right place to record that a rule has been overruled.
     fn act(&mut self, action: Action, stats: &mut Stats, stroke_active: bool) {
+        // Whatever the rules think, the user has now said otherwise for this window.
+        if !self.auto.is_empty() {
+            let class = self.under_position().class;
+            self.auto.overrule(&class);
+        }
+        self.switch(action, stats, stroke_active);
+    }
+
+    /// Apply the profile's `auto_activate` rules to whatever is under the position.
+    ///
+    /// Evaluated on entering a window rather than continuously: a rule is about arriving
+    /// somewhere, and re-asserting it every sample would make manual switching impossible.
+    ///
+    /// Never during a stroke. Drawing a line that happens to cross a window boundary is not a
+    /// request to change mode, and the deferral machinery would otherwise queue one for the
+    /// moment the stroke ended.
+    fn auto_switch(&mut self, stats: &mut Stats) {
+        if self.auto.is_empty() {
+            return;
+        }
+        let class = self.under_position().class;
+        let Some(slot) = self.auto.entering(&class) else {
+            return;
+        };
+        // Already there — nothing to announce and nothing to do.
+        if self.modes.target_for(Action::Select(slot)).is_none() {
+            return;
+        }
+
+        // Announced unconditionally, because software that changes its own behaviour silently
+        // is indistinguishable from software that is malfunctioning.
+        println!("auto-switch: {class} → mode {slot}");
+        self.switch(Action::Select(slot), stats, false);
+    }
+
+    fn switch(&mut self, action: Action, stats: &mut Stats, stroke_active: bool) {
         match self.modes.request(action, stroke_active) {
             Some(Switch::Applied(a)) => self.announce(a, stats),
             Some(Switch::Deferred(target)) => {

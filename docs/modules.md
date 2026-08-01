@@ -182,7 +182,10 @@ Orchestration, runtime state, safety.
 - Detects and reports conflicts: yeetmouse/maccel loaded, non-flat libinput
   acceleration, Steam Input.
 - Subscribes to `ratbagd`; exposes `SetDeviceResolution` for any other caller.
-- **Auto-switch is opt-in and always announces itself.**
+- **Auto-switch is opt-in and always announces itself.** Built: a profile's
+  `auto_activate` rules fire on *entering* a window, never continuously, and a manual
+  switch overrules that window's rule until the position leaves it. Otherwise the rule
+  would undo the user's hotkey on the next sample.
 
 ### Watchdog
 

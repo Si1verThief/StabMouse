@@ -4,6 +4,7 @@
 //! preset in a text editor, and the change takes effect within about half a second. That
 //! is the tuning loop, and it does not need D-Bus to work.
 
+mod auto;
 mod control;
 mod focus;
 mod modes;
@@ -421,6 +422,17 @@ fn run(
         .map(|(k, v)| (k.clone(), *v))
         .collect();
 
+    // Opt-in per profile, so an absent section means no auto-switching at all.
+    let auto_rules: Vec<(String, usize)> = store
+        .startup_profile()
+        .map(|p| {
+            p.auto_activate
+                .iter()
+                .map(|r| (r.app.clone(), r.mode))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let (published, announcements) = service::Published::new(service::Snapshot {
         profile: profile
             .clone()
@@ -509,6 +521,23 @@ fn run(
         println!("  per-application transport: unavailable (no focus source)");
     }
 
+    // Stated at startup because a rule that quietly does not fire is indistinguishable from a
+    // rule that is not there — and silence is the failure mode auto-switching earns least.
+    if !auto_rules.is_empty() {
+        println!(
+            "  auto-switch: {} rule(s) — {}",
+            auto_rules.len(),
+            auto_rules
+                .iter()
+                .map(|(app, slot)| format!("{app} → mode {slot}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if !focus_ok {
+            println!("               inactive: nothing can report which window you are over");
+        }
+    }
+
     // Started before the loop, so the very first iteration is already covered.
     let beat = watchdog::start(watchdog);
 
@@ -532,6 +561,7 @@ fn run(
         published,
         focus,
         tablet_overrides: overrides.clone(),
+        auto: auto::AutoSwitch::new(auto_rules),
         last_transport: None,
         tablet_clicks: store
             .startup_profile()

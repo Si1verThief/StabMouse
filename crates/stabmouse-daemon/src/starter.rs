@@ -177,6 +177,16 @@ default_mode = 1
 # The cost: anything launched while the tablet is absent gets no pressure until restarted.
 # destroy_tablet_on_leave = true
 
+# Switch mode automatically on entering an application. Opt-in: with this section absent,
+# nothing switches on its own. Every automatic switch prints a line saying so.
+#
+# The rule applies when you *enter* the window; if you then switch by hand, your choice stands
+# until you leave and come back. Use the classes `stabmouse-probe focus` reports.
+#
+# [[auto_activate]]
+# app = "krita"
+# mode = 2
+
 # Outputs: "mouse" is the ordinary pointer, delivered absolutely so switching modes never
 # teleports the cursor. "tablet" is a pen, dropping to "mouse" per window when the application
 # under it cannot take one. "relative" is raw deltas for games and anything else that locks
