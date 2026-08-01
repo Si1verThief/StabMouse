@@ -138,8 +138,9 @@ Device enumeration, identity, grabbing, reading, hotplug.
   remain **stable across reconnect**.
 - **Hotplug** re-establishes without user action. **Sleep/resume** recovers,
   including the timestamp discontinuity. Built: losing the source is a *waiting*
-  state, not an exit — exiting would take the virtual tablets with it, and every
-  application holding one loses pressure until it restarts (D13). The device's slot
+  state, not an exit — exiting would take the virtual tablets with it, and an
+  application *started* while they are gone gets no pressure for its whole lifetime
+  (D13); ones already running re-hook fine (P1b). The device's slot
   in the poll set goes negative, which `poll` skips, and the device is re-found by
   the same route that chose it, so a node returning as a different `eventN` is still
   recognised.

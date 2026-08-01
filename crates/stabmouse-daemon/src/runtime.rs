@@ -63,9 +63,13 @@ pub struct Runtime {
     /// The source device, absent while it is disconnected.
     ///
     /// `None` is a normal running state, not a failure: a wireless mouse that goes to sleep
-    /// takes its event node with it, and the daemon waits rather than dying — dying would take
-    /// the virtual tablets with it, and every application holding one loses pressure until it
-    /// restarts (D13).
+    /// takes its event node with it, and the daemon waits rather than dying.
+    ///
+    /// Dying would take the virtual tablets with it, and an application *started* while they
+    /// are absent gets no pressure for its entire lifetime (D13) — Krita initialises tablet
+    /// support once and never retries. Applications already running are unharmed and re-hook
+    /// when the tablet returns (P1b), so the cost is a window in which launching a drawing
+    /// application silently produces a session with no pressure.
     pub capture: Option<Capture>,
     pub control: Listener,
     pub mouse: MouseSink,
@@ -552,9 +556,13 @@ impl Runtime {
     /// Drop the source device and start waiting for it to return.
     ///
     /// Everything downstream is deliberately left standing: the virtual mouse, the pointer and
-    /// the tablets all survive, because tearing them down is what would cost every running
-    /// application its pressure (D13). Only the pen is lifted, since a tool left in proximity
-    /// over an application while nothing is driving it is the two-cursor hazard from D23.
+    /// the tablets all survive. Applications already holding a tablet would re-hook if it went
+    /// and came back (P1b), but one *started* while it is absent gets no pressure at all for
+    /// its lifetime (D13) — so the tablets outliving a disconnect is what keeps a badly-timed
+    /// application launch from quietly costing a whole session's pressure.
+    ///
+    /// Only the pen is lifted, since a tool left in proximity while nothing drives it is the
+    /// two-cursor hazard from D23.
     fn lose_device(&mut self, why: &str, fds: &mut [std::os::fd::RawFd], stroke_active: &mut bool) {
         // Dropping the capture closes the fd, which is also what releases the grab — the same
         // property the watchdog rests on (P8), here arriving by an ordinary route.
