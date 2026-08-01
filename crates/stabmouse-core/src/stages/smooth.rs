@@ -29,9 +29,12 @@ impl Default for Smooth {
     fn default() -> Self {
         Self {
             enabled: true,
-            // Effectively transparent by default; tuning is Batch 8.
-            min_cutoff_hz: 1000.0,
-            beta: 0.0,
+            // Measured general default (docs/stages.md): 0.30mm lag on deliberate
+            // strokes while removing ~12% of path wobble. `mc2 / b0.2` is the tremor
+            // variant. Beta must be in this range, not the ~0.007 seen in one-euro
+            // literature -- it multiplies velocity, and velocity here is mm/s.
+            min_cutoff_hz: 5.0,
+            beta: 0.05,
             d_cutoff_hz: 1.0,
             position_x: 0.0,
             position_y: 0.0,
@@ -157,7 +160,7 @@ mod tests {
 
     #[test]
     fn very_high_cutoff_is_near_transparent() {
-        let mut st = Smooth::default();
+        let mut st = Smooth::new(1000.0, 0.0, 1.0);
         let out = feed(&mut st, &[1.0; 200]);
         let total: f64 = out.iter().sum();
         assert!(

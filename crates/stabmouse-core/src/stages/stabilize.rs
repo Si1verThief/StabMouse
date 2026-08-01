@@ -3,9 +3,6 @@
 use crate::sample::Sample;
 use crate::stage::Stage;
 
-/// Below this remaining gap, closing is declared complete.
-const CLOSE_EPSILON_MM: f64 = 1.0e-6;
-
 /// The cursor drags an anchor on a leash. The anchor is what downstream sees.
 ///
 /// This produces the characteristic confident sweeping arc and is the single most
@@ -28,11 +25,10 @@ pub struct Stabilize {
     pub catch_up: f64,
     /// Jump the anchor straight to the cursor when a stroke ends.
     ///
-    /// **Off by default.** It recovers the right distance but draws a straight line to
-    /// get there — measured at 4000-9000 mm/s in one sample. The correct mechanism is
-    /// for the consumer to feed zero-motion ticks until `settled()`, letting the anchor
-    /// converge along its actual path. This remains available for consumers that cannot
-    /// tick, where falling short would be worse.
+    /// **Off by default, and it should usually stay off.** See the note on button state
+    /// below: catching up moves the stroke past where the user meant it to end, and it
+    /// empties the leash so the next movement has a dead zone a full radius wide.
+    /// Retained only because a consumer drawing with a very large radius might prefer it.
     pub snap_on_stroke_end: bool,
 
     cursor_x: f64,
@@ -40,8 +36,6 @@ pub struct Stabilize {
     anchor_x: f64,
     anchor_y: f64,
     primed: bool,
-    /// True between stroke end and full convergence.
-    closing: bool,
 }
 
 impl Default for Stabilize {
@@ -56,7 +50,6 @@ impl Default for Stabilize {
             anchor_x: 0.0,
             anchor_y: 0.0,
             primed: false,
-            closing: false,
         }
     }
 }
@@ -108,56 +101,35 @@ impl Stage for Stabilize {
             1.0
         };
 
-        if s.stroke_end {
-            if self.snap_on_stroke_end {
-                self.anchor_x = self.cursor_x;
-                self.anchor_y = self.cursor_y;
-                self.closing = false;
-            } else {
-                self.closing = true;
-            }
-        }
-
-        if s.stroke_start {
-            // Begin the stroke with no accumulated lag.
+        // Button state deliberately does NOT touch the leash.
+        //
+        // Two earlier versions moved the anchor at a stroke boundary — snapping to the
+        // cursor on press, and converging to it on release — on the reasoning that ink
+        // should begin and end at the hand's true position. Both were backwards for the
+        // same reason: **the anchor is what the user sees**, so they aim with it, press
+        // when it is on target, and release when it is where the stroke should end.
+        // Snapping on press teleported the cursor by a full radius; converging on release
+        // pushed the stroke past its intended end *and* emptied the leash, so the next
+        // movement had a dead zone one radius wide before anything moved at all.
+        //
+        // A stabiliser is a motion filter. Clicking is orthogonal to motion.
+        if s.stroke_end && self.snap_on_stroke_end {
             self.anchor_x = self.cursor_x;
             self.anchor_y = self.cursor_y;
-            self.closing = false;
-        } else {
-            // While closing, the leash collapses so the anchor converges all the way
-            // to the cursor instead of resting a radius behind it.
-            //
-            // The resting lag is not a defect — it is what pulled-string *is*, and it
-            // is why `settled()` cannot simply ask whether anchor equals cursor. But at
-            // stroke end the ink has to reach where the hand actually stopped, so the
-            // gap must be closed deliberately, over ticks rather than in one jump.
-            let effective_radius = if self.closing { 0.0 } else { radius };
-
-            let dx = self.cursor_x - self.anchor_x;
-            let dy = self.cursor_y - self.anchor_y;
-            let dist = dx.hypot(dy);
-
-            // The anchor only advances along the RADIAL direction. Tangential cursor
-            // motion barely moves it even at full hand speed — which is why the
-            // pressure stage cannot naively derive velocity from this output. See
-            // stages.md.
-            if dist > effective_radius && dist > 0.0 {
-                let target_x = self.cursor_x - dx / dist * effective_radius;
-                let target_y = self.cursor_y - dy / dist * effective_radius;
-                self.anchor_x += (target_x - self.anchor_x) * catch_up;
-                self.anchor_y += (target_y - self.anchor_y) * catch_up;
-            }
         }
 
-        // A geometric approach never reaches its target exactly. Terminate it rather
-        // than leaving an endless tail of vanishing deltas.
-        if self.closing {
-            let gap = (self.cursor_x - self.anchor_x).hypot(self.cursor_y - self.anchor_y);
-            if gap < CLOSE_EPSILON_MM {
-                self.anchor_x = self.cursor_x;
-                self.anchor_y = self.cursor_y;
-                self.closing = false;
-            }
+        let dx = self.cursor_x - self.anchor_x;
+        let dy = self.cursor_y - self.anchor_y;
+        let dist = dx.hypot(dy);
+
+        // The anchor only advances along the RADIAL direction. Tangential cursor motion
+        // barely moves it even at full hand speed — which is why the pressure stage cannot
+        // naively derive velocity from this output. See stages.md.
+        if dist > radius && dist > 0.0 {
+            let target_x = self.cursor_x - dx / dist * radius;
+            let target_y = self.cursor_y - dy / dist * radius;
+            self.anchor_x += (target_x - self.anchor_x) * catch_up;
+            self.anchor_y += (target_y - self.anchor_y) * catch_up;
         }
 
         s.dx = self.anchor_x - prev_x;
@@ -170,15 +142,15 @@ impl Stage for Stabilize {
         self.cursor_y = 0.0;
         self.anchor_x = 0.0;
         self.anchor_y = 0.0;
-        self.closing = false;
     }
 
-    /// Settled means "nothing outstanding", not "anchor equals cursor".
+    /// Always settled: this stage never holds anything back for later.
     ///
-    /// A pulled string legitimately rests a full radius behind the cursor, so demanding
-    /// coincidence would make this permanently false and any tick loop infinite.
+    /// A pulled string rests up to a full radius behind the cursor, permanently and by
+    /// design. That lag is the filter working, not output awaiting a flush — so asking for
+    /// coincidence would make this forever false and any tick loop infinite.
     fn settled(&self) -> bool {
-        !self.closing
+        true
     }
 
     fn enabled(&self) -> bool {
@@ -242,17 +214,20 @@ mod tests {
         assert!(out_x.abs() < 1e-12 && out_y.abs() < 1e-12);
     }
 
-    /// Ticking to convergence is the supported way to recover the lag; snapping is the
-    /// fallback for consumers that cannot tick. Both must end up in the same place.
+    /// The lag persists after a stroke ends, and that is correct.
+    ///
+    /// The stroke ends where the *visible* cursor was when the button came up, because that
+    /// is what the user aimed with. Catching up afterwards would push the line past its
+    /// intended end.
     #[test]
-    fn ticking_to_settled_recovers_the_full_distance() {
-        let mut st = Stabilize::new(5.0, 0.35);
+    fn the_leash_survives_a_stroke_ending() {
+        let mut st = Stabilize::new(5.0, 1.0);
         let mut total = 0.0;
         let mut t = 0u64;
 
-        for i in 0..2 {
+        for i in 0..40 {
             t += 1_000;
-            let mut s = Sample::new(20.0, 0.0, t, true);
+            let mut s = Sample::new(1.0, 0.0, t, true);
             s.dt = 0.001;
             s.stroke_start = i == 0;
             st.process(&mut s);
@@ -266,23 +241,53 @@ mod tests {
         st.process(&mut s);
         total += s.dx;
 
-        assert!(!st.settled(), "lag should still be outstanding at stroke end");
+        assert!(st.settled(), "nothing should be held back for a later flush");
+        assert!(
+            (total - 35.0).abs() < 1e-6,
+            "40mm in with a 5mm leash should give 35mm out, got {total}"
+        );
+    }
 
-        // Zero-motion ticks, as the daemon supplies.
-        let mut ticks = 0;
-        while !st.settled() && ticks < 10_000 {
+    /// Regression guard for the dead zone after a click.
+    ///
+    /// An earlier version converged the anchor onto the cursor when a stroke ended, which
+    /// emptied the leash — so the next movement had to travel a full radius before the
+    /// cursor moved at all. Reported from use as having to "feed a bunch of inputs to be
+    /// allowed to continue moving".
+    #[test]
+    fn clicking_does_not_create_a_dead_zone() {
+        let mut st = Stabilize::new(5.0, 1.0);
+        let mut t = 0u64;
+
+        // Establish steady motion so the leash is taut.
+        for _ in 0..40 {
             t += 1_000;
-            let mut s = Sample::new(0.0, 0.0, t, false);
+            let mut s = Sample::new(1.0, 0.0, t, false);
             s.dt = 0.001;
             st.process(&mut s);
-            total += s.dx;
-            ticks += 1;
         }
 
-        assert!(st.settled(), "should have converged within {ticks} ticks");
+        // A full click: press then release, without moving.
+        for (i, down) in [true, false].into_iter().enumerate() {
+            t += 1_000;
+            let mut s = Sample::new(0.0, 0.0, t, down);
+            s.dt = 0.001;
+            s.stroke_start = i == 0;
+            s.stroke_end = i == 1;
+            st.process(&mut s);
+        }
+
+        // The very next movement must produce output immediately.
+        t += 1_000;
+        let mut s = Sample::new(1.0, 0.0, t, false);
+        s.dt = 0.001;
+        st.process(&mut s);
+
         assert!(
-            (total - 40.0).abs() < 1e-4,
-            "ticking should recover all 40mm, got {total} after {ticks} ticks"
+            (s.dx - 1.0).abs() < 1e-6,
+            "after a click, 1mm of movement should still yield 1mm of output; got {} \
+             (the leash was emptied, so the cursor is stuck)",
+            s.dx
         );
     }
 

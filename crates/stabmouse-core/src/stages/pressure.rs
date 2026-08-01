@@ -71,8 +71,11 @@ impl Default for Pressure {
             release_s: 0.06,
             envelope_enabled: true,
             speed_enabled: true,
-            v_max_mm_s: 400.0,
-            gamma: 1.0,
+            // Measured (docs/stages.md): careful drawing peaks at 20-30 mm/s within a
+            // stroke, so 400 pinned pressure near maximum and every trace looked flat.
+            // 50 / 2.0 gives a 0.45 pressure arch with zero clipping.
+            v_max_mm_s: 50.0,
+            gamma: 2.0,
             source: SpeedSource::Cursor,
             velocity_smoothing_s: 0.04,
             stall_threshold_mm: 0.04,
@@ -352,9 +355,12 @@ mod tests {
                 }
                 last
             };
-            push(&mut st, 0.5, 200, &mut t); // moving fast
+            // 0.02mm per 1ms is 20 mm/s -- inside the working range of v_max = 50, so
+            // the speed term is neither saturated nor clamped and the two stall
+            // behaviours can actually be distinguished.
+            push(&mut st, 0.02, 200, &mut t); // moving
             push(&mut st, 0.0, 30, &mut t); // stalled
-            push(&mut st, 0.5, 5, &mut t) // moving again
+            push(&mut st, 0.02, 5, &mut t) // moving again
         }
 
         let held = run(StallBehaviour::Hold);
@@ -374,18 +380,19 @@ mod tests {
     fn a_settled_envelope_survives_a_long_sample_interval() {
         let mut st = Pressure::default();
 
-        // Settle at full pressure with fast samples.
+        // Stationary while held, so the speed term is 1 and this measures the envelope
+        // alone rather than the interaction of two terms.
         let mut t = 0u64;
         for i in 0..300 {
             t += 1_000;
-            let mut s = Sample::new(0.01, 0.0, t, true);
+            let mut s = Sample::new(0.0, 0.0, t, true);
             s.dt = 0.001;
             s.stroke_start = i == 0;
             st.process(&mut s);
         }
         let settled = {
             t += 1_000;
-            let mut s = Sample::new(0.01, 0.0, t, true);
+            let mut s = Sample::new(0.0, 0.0, t, true);
             s.dt = 0.001;
             st.process(&mut s);
             s.pressure.unwrap()
@@ -394,7 +401,7 @@ mod tests {
 
         // A 60ms gap, still held down. Pressure must not fall off a cliff.
         t += 60_000;
-        let mut s = Sample::new(0.01, 0.0, t, true);
+        let mut s = Sample::new(0.0, 0.0, t, true);
         s.dt = 0.060;
         st.process(&mut s);
         let after = s.pressure.unwrap();

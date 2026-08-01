@@ -28,6 +28,12 @@ impl Quantizer {
         self.counts_per_mm = sanitise_dpi(dpi) / 25.4;
     }
 
+    /// The scale itself, for callers that advance a continuous position instead of
+    /// quantizing deltas — counts and pixels are 1:1 on StabMouse's own devices.
+    pub fn counts_per_mm(&self) -> f64 {
+        self.counts_per_mm
+    }
+
     /// Drop the pending remainder. Used on discontinuity, where the carried fraction
     /// belongs to motion that is no longer relevant.
     pub fn reset(&mut self) {
@@ -40,6 +46,25 @@ impl Quantizer {
         (
             Self::axis(dx_mm, self.counts_per_mm, &mut self.carry_x),
             Self::axis(dy_mm, self.counts_per_mm, &mut self.carry_y),
+        )
+    }
+
+    /// Quantize at a caller-supplied scale, sharing the same subpixel carry.
+    ///
+    /// Used when a tablet mode falls back to the pointer: the scale is then the tablet's
+    /// pixels-per-millimetre rather than the source device's counts-per-millimetre, so the
+    /// sensitivity does not change with the transport.
+    ///
+    /// The carry is deliberately the *same* accumulator. Motion conservation is the point of
+    /// it, and a second carry would drop the remainder every time the transport changed —
+    /// exactly the accumulation hazard recorded in modules.md.
+    pub fn quantize_at(&mut self, dx_mm: f64, dy_mm: f64, scale: f64) -> (i32, i32) {
+        if !scale.is_finite() || scale <= 0.0 {
+            return self.quantize(dx_mm, dy_mm);
+        }
+        (
+            Self::axis(dx_mm, scale, &mut self.carry_x),
+            Self::axis(dy_mm, scale, &mut self.carry_y),
         )
     }
 
@@ -78,6 +103,42 @@ fn sanitise_dpi(dpi: f64) -> f64 {
         // docs/modules.md: an unknown DPI is assumed to be 1000 and surfaced in the
         // UI. Here we only need to avoid producing a nonsense scale.
         1000.0
+    }
+}
+
+#[cfg(test)]
+mod tests_scale {
+    use super::*;
+
+    #[test]
+    fn an_explicit_scale_is_used_instead_of_the_device_one() {
+        let mut q = Quantizer::new(1600.0);
+        // 10mm at 9.6 px/mm is 96 pixels, regardless of the source DPI.
+        let (dx, _) = q.quantize_at(10.0, 0.0, 9.6);
+        assert_eq!(dx, 96);
+    }
+
+    #[test]
+    fn a_bad_scale_falls_back_rather_than_emitting_nothing() {
+        let mut q = Quantizer::new(1600.0);
+        let (a, _) = q.quantize_at(5.0, 0.0, f64::NAN);
+        let mut q2 = Quantizer::new(1600.0);
+        let (b, _) = q2.quantize(5.0, 0.0);
+        assert_eq!(a, b, "an unusable scale must not silently stop motion");
+        assert_eq!(q.quantize_at(1.0, 0.0, 0.0).0, q2.quantize(1.0, 0.0).0);
+    }
+
+    #[test]
+    fn the_carry_is_shared_across_scales() {
+        // The accumulation hazard: a separate carry per scale would drop the remainder every
+        // time the transport changed.
+        let mut q = Quantizer::new(1600.0);
+        let mut total = 0;
+        for _ in 0..10 {
+            total += q.quantize_at(0.05, 0.0, 9.6).0;
+        }
+        // 0.5mm at 9.6 px/mm is 4.8 pixels; conserved motion means 4, not 0.
+        assert_eq!(total, 4);
     }
 }
 
