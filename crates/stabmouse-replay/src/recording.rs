@@ -153,9 +153,11 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn write_temp(body: &str) -> std::path::PathBuf {
+    /// Unique per call: tests run in parallel, and a pid-only name made two of them race
+    /// over the same file.
+    fn write_temp(tag: &str, body: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("stabmouse-test-{}.tsv", std::process::id()));
+        path.push(format!("stabmouse-test-{}-{tag}.tsv", std::process::id()));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         path
@@ -167,7 +169,7 @@ mod tests {
             "{}1000\t3\t-1\t0\n2000\t0\t0\t1\n3000\t-2\t5\t1\n",
             Recording::header("test device", 1600.0)
         );
-        let path = write_temp(&body);
+        let path = write_temp("roundtrip", &body);
         let r = Recording::load(&path).unwrap();
 
         assert_eq!(r.device, "test device");
@@ -183,7 +185,7 @@ mod tests {
     #[test]
     fn malformed_lines_are_reported_with_a_line_number() {
         let body = format!("{}1000\t3\n", Recording::header("d", 800.0));
-        let path = write_temp(&body);
+        let path = write_temp("malformed", &body);
         let err = Recording::load(&path).unwrap_err().to_string();
         assert!(err.contains(":5:"), "error should name the line: {err}");
         std::fs::remove_file(path).ok();

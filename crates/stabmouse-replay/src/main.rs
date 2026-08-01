@@ -233,7 +233,7 @@ fn compare(input: &PathBuf, variants: &PathBuf, out: &PathBuf, tick_ms: u64) -> 
         .with_context(|| format!("creating {}", out.display()))?;
     writeln!(
         file,
-        "variant,i,t_us,dt_ms,in_dx,in_dy,out_dx_mm,out_dy_mm,out_x_mm,out_y_mm,out_dx_counts,speed_mm_s,pressure,down"
+        "variant,i,t_us,dt_ms,in_dx,in_dy,out_dx_mm,out_dy_mm,out_x_mm,out_y_mm,out_dx_counts,speed_mm_s,pressure,down,tick"
     )?;
 
     let (in_x, in_y) = rec.total_counts();
@@ -284,7 +284,7 @@ fn compare(input: &PathBuf, variants: &PathBuf, out: &PathBuf, tick_ms: u64) -> 
 
             writeln!(
                 file,
-                "{},{},{},{:.3},{},{},{:.6},{:.6},{:.6},{:.6},{},{:.3},{:.6},{}",
+                "{},{},{},{:.3},{},{},{:.6},{:.6},{:.6},{:.6},{},{:.3},{:.6},{},{}",
                 v.name,
                 i,
                 e.t_us,
@@ -298,7 +298,8 @@ fn compare(input: &PathBuf, variants: &PathBuf, out: &PathBuf, tick_ms: u64) -> 
                 cx,
                 s.speed_mm_s.unwrap_or(0.0),
                 p,
-                u8::from(e.down)
+                u8::from(e.down),
+                u8::from(e.tick)
             )?;
         }
 
