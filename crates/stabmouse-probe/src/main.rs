@@ -6,7 +6,12 @@
 //! delivered as pressure to applications that support it and as plain pointer
 //! motion to those that do not.
 
+mod abspointer;
 mod latency;
+mod mapping;
+mod focus;
+mod recreate;
+mod tap;
 mod passthrough;
 mod tablet;
 
@@ -27,18 +32,33 @@ enum Command {
     List,
     /// Create a virtual tablet, optionally driven from a real mouse.
     Tablet(tablet::Args),
+    /// Time how long a virtual tablet takes to become usable after creation.
+    Recreate(recreate::Args),
+    /// Check that a tablet can be confined to one screen automatically.
+    Mapping(mapping::Args),
+    /// Tap at a point with a virtual tablet, to see whether it lands as a click.
+    Tap(tap::Args),
+    /// Watch focus changes, to see whether per-application output is viable.
+    Focus(focus::Args),
     /// Measure evdev->uinput round-trip latency. Fully synthetic; safe to run.
     Latency(latency::Args),
     /// Grab a real mouse and forward it through a virtual device.
     Passthrough(passthrough::Args),
+    /// Create an absolute pointer and measure whether it drives the cursor, and how.
+    Abspointer(abspointer::Args),
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::List => list(),
         Command::Tablet(args) => tablet::run(args),
+        Command::Recreate(args) => recreate::run(args),
+        Command::Mapping(args) => mapping::run(args),
+        Command::Tap(args) => tap::run(args),
+        Command::Focus(args) => focus::run(args),
         Command::Latency(args) => latency::run(args),
         Command::Passthrough(args) => passthrough::run(args),
+        Command::Abspointer(args) => abspointer::run(args),
     }
 }
 
